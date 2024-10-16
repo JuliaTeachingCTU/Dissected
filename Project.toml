@@ -1,0 +1,4 @@
+name = "Dissected"
+uuid = "5ecf044d-68cd-4804-91b4-a9b168bb4540"
+authors = ["Tomas Pevny <pevnak@gmail.com>"]
+version = "0.1.0"
