@@ -313,29 +313,55 @@ Interestingly, ``R_{n_0}`` can be computed sequentially utilizing outputs on pre
 wishes to compute chunks in paralel.
 
 ````julia
-function chunked_forward(layer::RetentionLayer, x; chunk_size = 16)
+function chunked_forward(layer::RetentionLayer, x; chunk_size = 64)
     Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
     K = rotary_embedding(layer.Wk * x, -layer.θₐ)
     v = layer.Wv * x
+    R₀ = zeros(eltype(v), size(K,1))
     os = map(1:chunk_size:size(v,2)) do n₀
         n₁ = min(n₀ + chunk_size - 1, size(v,2))
         Qᵢ = Q[:, n₀:n₁]
         Kᵢ = K[:, n₀:n₁]
         vᵢ = v[:, n₀:n₁]
         Dᵢ = DMatrix(layer.γ, size(Qᵢ, 2));
-````
-
-Rᵢ += sum(layer.γ^(-m) * K[:,m] * v[m] for m in 1:n₀-1)
-
-````julia
-        Rᵢ = sum(layer.γ^(-m) * K[:,m] * v[m] for m in 1:n₀-1; init = zeros(eltype(v), size(K,1)))
+        Rᵢ = sum(layer.γ^(-m) * K[:,m] * v[m] for m in 1:n₀-1; init = R₀)
         oᵢ = transpose(((Qᵢ' * Kᵢ) .* Dᵢ) * vᵢ') .+ γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ)
     end
     reduce(hcat, os)
 end
 
-chunked_forward(layer, x) ≈ batch_forward(layer, x)
+chunked_forward(layer, x; chunk_size = 4) ≈ batch_forward(layer, x)
 ````
+
+Let's now investigate, how the time of different implementations
+
+````julia
+layer = RetentionLayer(6, 8)
+map(4:12) do i
+    x = randn(Float32, 6, 2^i)
+    (;
+    recurrent = (@elapsed recursive_forward(layer, x)),
+    batch = (@elapsed batch_forward(layer, x)),
+    chunked_16 = (@elapsed chunked_forward(layer, x; chunk_size = 16)),
+    chunked_64 = (@elapsed chunked_forward(layer, x; chunk_size = 64)),
+    )
+end |> DataFrame
+````
+
+Which gives the following timing
+```
+ Row │ recurrent    batch        chunked_16  chunked_64
+─────┼──────────────────────────────────────────────────
+   1 │ 0.000105583  2.0542e-5     2.3875e-5  6.792e-6
+   2 │ 2.0166e-5    2.3e-5        1.5209e-5  1.6583e-5
+   3 │ 2.6792e-5    3.15e-5       3.2959e-5  3.0e-5
+   4 │ 4.4458e-5    0.00012075    8.9042e-5  6.7792e-5
+   5 │ 8.3167e-5    0.000472542   0.000314   0.00017025
+   6 │ 0.000173292  0.00316263    0.0243694  0.00036075
+   7 │ 0.000261458  0.00558696    0.01567    0.00107129
+   8 │ 0.00047175   0.0245833     0.0153968  0.00352863
+   9 │ 0.000888125  0.129687      0.0619108  0.0158096
+```
 
 ---
 

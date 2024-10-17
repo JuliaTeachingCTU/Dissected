@@ -7,6 +7,7 @@
 # and especially verify author's understanding of the math.
 
 using LinearAlgebra
+using DataFrames
 
 # The explanation of the model stats with state-space model assuming 
 # the input `v` to be (projected to) 1d signal.
@@ -302,9 +303,10 @@ chunked_forward(layer, x; chunk_size = 4) ≈ batch_forward(layer, x)
 # Let's now investigate, how the time of different implementations
 
 layer = RetentionLayer(6, 8)
-map(4:12) do i
+map(4:14) do i
     x = randn(Float32, 6, 2^i)
     (;
+    sequence_length = 2^i,
     recurrent = (@elapsed recursive_forward(layer, x)),
     batch = (@elapsed batch_forward(layer, x)),
     chunked_16 = (@elapsed chunked_forward(layer, x; chunk_size = 16)),
@@ -312,5 +314,22 @@ map(4:12) do i
     )
 end |> DataFrame
 
+# Which gives the following timing
+# ```
+#  Row │ sequence_length  recurrent    batch        chunked_16   chunked_64
+#      │ Int64            Float64      Float64      Float64      Float64
+# ─────┼─────────────────────────────────────────────────────────────────────
+#    1 │              16  9.5708e-5    1.875e-5     2.975e-5     6.791e-6
+#    2 │              32  2.9583e-5    1.3292e-5    2.3625e-5    1.2667e-5
+#    3 │              64  3.7042e-5    6.0542e-5    0.000103125  5.6708e-5
+#    4 │             128  5.05e-5      0.000121458  0.000120792  8.0416e-5
+#    5 │             256  9.7125e-5    0.000556584  0.000434958  0.000208458
+#    6 │             512  0.000180959  0.00212967   0.00147575   0.00470637
+#    7 │            1024  0.000327375  0.00916213   0.00537783   0.00258329
+#    8 │            2048  0.000589917  0.0301123    0.0241839    0.0068275
+#    9 │            4096  0.00116263   0.185624     0.0980744    0.02567
+#   10 │            8192  0.00293392   1.03431      0.425546     0.106468
+#   11 │           16384  0.00690087   4.83593      1.79971      0.422945
+# ```
     
 
