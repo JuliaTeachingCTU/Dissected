@@ -2,3 +2,11 @@ name = "Dissected"
 uuid = "5ecf044d-68cd-4804-91b4-a9b168bb4540"
 authors = ["Tomas Pevny <pevnak@gmail.com>"]
 version = "0.1.0"
+
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Literate = "98b081ad-f1c9-55d3-8b20-4c87d4299306"
+
+[compat]
+Documenter = "1.7.0"
+Literate = "2.20.0"

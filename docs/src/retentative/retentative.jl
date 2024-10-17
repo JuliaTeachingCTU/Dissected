@@ -98,7 +98,7 @@ end
 # A length-extrapolatable transformer, https://arxiv.org/pdf/2212.10554.
 
 # A minor trick I do not understand how authors deal with complex numbers and they are not so 
-# vocal about that. Anyway the important property of the matrix `A` are such that `A^(i+j)` A^i*A^j` 
+# vocal about that. Anyway the important property of the matrix `A` are such that `A^(-1) = A'` 
 # and the exponents can be computed efficiently, which is a property of real rotation matrices 
 # used in the implementation. The real rotation matrix is defined as
 
@@ -262,4 +262,7 @@ recursive_forward(layer, x) ≈ batch_forward(layer, x)
 # means that we divide the input sequence into continous sub-sequences, compute the attention
 # in parallel and then concatenate the results. Thanks to the linearity of the attention, we can easily
 # recreate the state from the previous chunks.
+
+
+
 
