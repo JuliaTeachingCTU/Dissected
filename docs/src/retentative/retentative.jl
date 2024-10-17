@@ -10,8 +10,8 @@ using LinearAlgebra
 
 # The explanation of the model stats with state-space model assuming 
 # the input `v` to be (projected to) 1d signal.
-# The state of the model is updated as `s\[n+1\] = A*s\[n\] + K*u\[n\]` and
-# the output is as `o\[n\] = Q*s\[n\]`. 
+# The state of the model is updated as `sₙ₊₁ = A*sₙ + K*uₙ` and
+# the output is as `oₙ = Q*sₙ`. 
 # The model is threfore defined by matrices `A`, `K`, and `Q`.
 
 struct Model{MA,MK,MQ}
@@ -242,11 +242,11 @@ function rotary_embedding(x::AbstractMatrix, θ::AbstractVector)
 end
 
 # With that, the batch forward function will look like, which is neet and fast (but allocates a lot with which we will deal later)
-function batch_forward(m::RetentionLayer, x)
-    Q = rotary_embedding(m.Wq * x, -m.θₐ)
-    K = rotary_embedding(m.Wk * x, -m.θₐ)
-    v = m.Wv * x
-    D = DMatrix(m.γ, size(Q, 2));
+function batch_forward(layer::RetentionLayer, x)
+    Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
+    K = rotary_embedding(layer.Wk * x, -layer.θₐ)
+    v = layer.Wv * x
+    D = DMatrix(layer.γ, size(Q, 2));
     transpose(((Q' * K) .* D) * v')
 end
 
@@ -258,11 +258,59 @@ x = randn(Float32, 6, 33)
 recursive_forward(layer, x) ≈ batch_forward(layer, x)
 
 # The `batch_forward` has quadratic memory footprint and complexity as the original transformer. But
-# since the attention is almost linear, we can decrease the memory footprint by "chunking", which\
-# means that we divide the input sequence into continous sub-sequences, compute the attention
-# in parallel and then concatenate the results. Thanks to the linearity of the attention, we can easily
-# recreate the state from the previous chunks.
+# since the attention is almost linear, we can decrease the memory footprint by "chunking".
+# In chunking, the input sequence is broken into continous sub-sequences, on each sub-sequence
+# the output is computed in parralel, and then corrected for the previous sub_sequences.
+#
+# The math behind is simple and therefore not carried in the paper. The chunking is derived below
+# to match it to the implemention. The `n`-ith output is computed as 
+# ```math
+# \begin{aligned}
+# o_n & = \sum_{m=1}^n Q_n \gamma^ne^{in\theta} (K_m \gamma^{-m} e^{in\theta})^{\mathrm{T}} v_m \\ 
+# o_n & = Q_n \gamma^ne^{in\theta} \sum_{m=1}^n  (K_m \gamma^{-m} e^{in\theta})^{\mathrm{T}} v_m
+# \end{aligned}
+# ```
+# now imagine that we compute only items of the output higher than some $n_0.$ We can therefore precompute
+# part of the sum ``R_{n_0} = \sum_{m=1}^{n_0-1}  (K_m \gamma^{-m} e^{in\theta})^{\mathrm{T}} v_m`` with which 
+# the items ``o_n, n \geq n_0`` can be computed as
+# ```math
+# o_n =  Q_n \gamma^ne^{in\theta} \sum_{m=n_0}^n  (K_m \gamma^{-m} e^{in\theta})^{\mathrm{T}} v_m  + Q_n \gamma^ne^{in\theta} R_{n_0}\\
+# ```
+# And this is great, because now the complexity is linear with respect to number of chunks and qudratic with respect to length of chunks.
+# Interestingly, ``R_{n_0}`` can be computed sequentially utilizing outputs on previous chunks, or in parallel if one 
+# wishes to compute chunks in paralel.
 
+function chunked_forward(layer::RetentionLayer, x; chunk_size = 64)
+    Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
+    K = rotary_embedding(layer.Wk * x, -layer.θₐ)
+    v = layer.Wv * x
+    R₀ = zeros(eltype(v), size(K,1))
+    os = map(1:chunk_size:size(v,2)) do n₀
+        n₁ = min(n₀ + chunk_size - 1, size(v,2))
+        Qᵢ = Q[:, n₀:n₁]
+        Kᵢ = K[:, n₀:n₁]
+        vᵢ = v[:, n₀:n₁]
+        Dᵢ = DMatrix(layer.γ, size(Qᵢ, 2));
+        Rᵢ = sum(layer.γ^(-m) * K[:,m] * v[m] for m in 1:n₀-1; init = R₀)
+        oᵢ = transpose(((Qᵢ' * Kᵢ) .* Dᵢ) * vᵢ') .+ γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ)
+    end
+    reduce(hcat, os)
+end
 
+chunked_forward(layer, x; chunk_size = 4) ≈ batch_forward(layer, x)
 
+# Let's now investigate, how the time of different implementations
+
+layer = RetentionLayer(6, 8)
+map(4:12) do i
+    x = randn(Float32, 6, 2^i)
+    (;
+    recurrent = (@elapsed recursive_forward(layer, x)),
+    batch = (@elapsed batch_forward(layer, x)),
+    chunked_16 = (@elapsed chunked_forward(layer, x; chunk_size = 16)),
+    chunked_64 = (@elapsed chunked_forward(layer, x; chunk_size = 64)),
+    )
+end |> DataFrame
+
+    
 
