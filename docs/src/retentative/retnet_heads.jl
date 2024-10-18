@@ -83,20 +83,29 @@ end
 
 # The retention layer for multiple heads behave like a stacked single layers. So the first 
 # implementaion will behave like that. There will be space for improvements, but let's make the
-# implementations correct first and then make them fast.
+# implementations correct first and then make them fast. 
+
+function _slices(hidden_dim::Integer, output_dim::Integer, nheads::Integer)
+    head_dim = hidden_dim ÷ nheads
+    odim = output_dim ÷ nheads
+    kvslices = ntuple(i -> (i-1)*head_dim+1:i*head_dim, nheads)
+    oslices = ntuple(i -> (i-1)*odim+1:i*odim, nheads)
+    return(kvslices, oslices)
+end
+
+function _slices(K::AbstractMatrix, V::AbstractMatrix, γs::AbstractVector)
+    _slices(size(K,1), size(V,1), length(γs))
+end
 
 function recursive_forward(layer::RetentionLayer{<:Vector}, x)
-    Wk,Wq, Wv, θₐ, γs = layer.Wk, layer.Wq, layer.Wv, layer.θₐ, layer.γ
-    head_dim = size(Wk, 1) ÷ length(γs)
-    odim = size(Wv,1) ÷ length(γs)
+    Wk, Wq, Wv, θₐ, γs = layer.Wk, layer.Wq, layer.Wv, layer.θₐ, layer.γ
+    kvslices, oslices = _slices(Wk, Wv, γs)
     θ_dim = head_dim ÷ 2
-    slices = map(enumerate(γs)) do (i, γ)
-        kvslice = (i-1)*head_dim+1:i*head_dim
-        oslice = (i-1)*odim+1:i*odim
+    os = map(enumerate(zip(γs, kvslices, oslices))) do (i, (γ, kvslice, oslice))
         θᵢ = θₐ[(i-1)*θ_dim+1:i*θ_dim]
         recursive_forward(Wq[kvslice,:], Wk[kvslice,:], Wv[oslice,:], γ, θᵢ, x)
     end
-    reduce(vcat, slices)
+    reduce(vcat, os)
 end
 
 function recursive_forward(Wq, Wk, Wv, γ::Real, θₐ, x)
@@ -135,14 +144,11 @@ function linear_attention(Q, K, V, γ::Real, chunk_size)
 end
 
 function linear_attention(Q, K, V, γs::Vector{<:Real}, chunk_size)
-    head_dim = size(Q,1) ÷ length(γs)
-    odim = size(V, 1) ÷ length(γs)
-    slices = map(enumerate(γs)) do (i, γ)
-        kvslice = (i-1)*head_dim+1:i*head_dim
-        oslice = (i-1)*odim+1:i*odim
+    kvslices, oslices = _slices(Q, K, γs)
+    os = map(enumerate(zip(γs, kvslices, oslices))) do (i, (γ, kvslice, oslice))
         linear_attention(Q[kvslice,:], K[kvslice,:], V[oslice,:], γ, chunk_size)
     end
-    reduce(vcat, slices)
+    reduce(vcat, os)
 end
 
 function _linear_attention(Q, K, V, γ::Real)
@@ -151,14 +157,14 @@ function _linear_attention(Q, K, V, γ::Real)
 end
 
 function _chunked_linear_attention(Q, K, V, γ::Real, chunk_size)
-    R₀ = zeros(T, size(layer.Wk, 1), size(layer.Wv, 1))
-    os = map(1:chunk_size:size(v,2)) do n₀
-        n₁ = min(n₀ + chunk_size - 1, size(v,2))
+    R₀ = zeros(eltype(V), size(K, 1), size(V, 1))
+    os = map(1:chunk_size:size(V,2)) do n₀
+        n₁ = min(n₀ + chunk_size - 1, size(V,2))
         Qᵢ = Q[:, n₀:n₁]
         Kᵢ = K[:, n₀:n₁]
         Vᵢ = V[:, n₀:n₁]
         Rᵢ = sum(γ^(-m) * K[:,m] * V[:,m]' for m in 1:n₀-1; init = R₀)
-        oᵢ = linear_attention(Qᵢ,Kᵢ,Vᵢ) .+ γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ)
+        oᵢ = _linear_attention(Qᵢ, Kᵢ, Vᵢ, γ) .+ γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ)
     end
     reduce(hcat, os)
 end
@@ -168,7 +174,7 @@ end
 # completely in parallel.
 #
 
-x = randn(Float32, 8, 3)
+x = randn(Float32, 8, 257)
 layer = RetentionLayer(8, 8, 8; nheads = 2)
 head_dim = size(layer.Wk,1) ÷ length(layer.γ)
 odim = size(layer.Wv, 1) ÷ length(layer.γ)
