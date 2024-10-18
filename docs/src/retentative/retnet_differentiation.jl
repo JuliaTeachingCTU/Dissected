@@ -30,12 +30,16 @@ end
 function ∂rotary_embedding(ȳ, x::AbstractMatrix, θ::AbstractVector)
     x̄ = similar(x)
     θ̄ = similar(θ)
+    θ̄ .= 0
     @inbounds for i in axes(x,2)
         for (kᵢ, θₖ) in enumerate(θ)
             k = 2*kᵢ - 1
             sinᵢ, cosᵢ  = sincos(i * θₖ)
             x̄[k,i]   =  ȳ[k,i] * cosᵢ + ȳ[k+1,i] * sinᵢ
             x̄[k+1,i] = -ȳ[k,i] * sinᵢ + ȳ[k+1,i] * cosᵢ
+
+            θ̄[kᵢ] += i* (- ȳ[k,i]   * x[k,i]  * sinᵢ - x[k+1,i] * ȳ[k,i] * cosᵢ 
+                   - x[k+1,i] * ȳ[k+1,i] *sinᵢ + x[k,i] * ȳ[k+1,i] * cosᵢ)
         end
     end
     x̄, θ̄
@@ -51,10 +55,10 @@ function ChainRulesCore.rrule(::typeof(rotary_embedding), x::AbstractMatrix, θ:
     return y, foo_mul_pullback
 end
 
-
 x = randn(4,10)
 θ = 2π .* rand(2)
 
 rotary_embedding(x, θ)
 
-gradient(x -> sum(rotary_embedding(x, θ)), x)[1] ≈ grad(central_fdm(5,1), x -> sum(rotary_embedding(x, θ)), x)[1]
+gradient(x -> sum(rotary_embedding(x, θ)), x)[1]  ≈ grad(central_fdm(5,1), x -> sum(rotary_embedding(x, θ)), x)[1]
+gradient(θ -> sum(rotary_embedding(x, θ)), θ)[1]  ≈ grad(central_fdm(5,1), θ -> sum(rotary_embedding(x, θ)), θ)[1]
