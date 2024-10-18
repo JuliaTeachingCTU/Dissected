@@ -164,7 +164,7 @@ end
 # The above is nice, as the `map` can be already run in parallel. There is no expensive
 # matrix exponentiation, as we just exponentiate scalar.
 # The paper shows a transformer-like formulation. For it, we define a mask matrix
-# `D` with `D_{ij} = γ^(|i-j|) if i ≥ j`. Then, the inference can be written in matrix
+# ``D`` with ``D_{ij} = γ^{(|i-j|)}`` if ``i ≥ j``. Then, the inference can be written in matrix
 # forms as
 
 struct DMatrix{T} <:AbstractMatrix{T}
@@ -194,7 +194,7 @@ struct RetentionLayer{Θ,M,T}
     γ::T
 end
 
-function RetentionLayer(input_dim, hidden_dim, γ = 0.99f0, T = Float32)
+function RetentionLayer(input_dim, hidden_dim; γ = 0.99f0, T = Float32)
     θₐ = T.(2π .* rand(hidden_dim ÷ 2))
     Wk = randn(T, hidden_dim, input_dim)
     Wq = randn(T, hidden_dim, input_dim)
@@ -205,21 +205,21 @@ end
 
 Base.show(io::IO, m::RetentionLayer) = print(io, "RetentionLayer($(size(m.Wk,1)) => $(size(m.Wk,2)))")
 
-function recursive_forward(m::RetentionLayer, x)
+function recursive_forward(layer::RetentionLayer, x)
     T = eltype(v)
-    s₀ = zeros(size(m.Wk, 1))
-    o₀ = zero(T)
-    A = rot_matrix(m.θₐ)
+    s₀ = zeros(T, size(layer.Wk, 1), size(layer.Wv, 1))
+    o₀ = zeros(T, size(layer.Wv, 1))
+    A = rot_matrix(layer.θₐ)
     function _step((on, sn), xᵢ)
-        K = m.Wk * xᵢ
-        Q = m.Wq * xᵢ
-        vᵢ = m.Wv * xᵢ
-        snn = A * sn + K .* vᵢ
-        on = dot(Q, snn)
-        return(on, m.γ .* snn)
+        Kᵢ = layer.Wk * xᵢ
+        Qᵢ = layer.Wq * xᵢ
+        vᵢ = layer.Wv * xᵢ
+        snn = A * sn + Kᵢ .* vᵢ'
+        on = Qᵢ' * snn
+        return(on', layer.γ .* snn)
     end
     os = accumulate(_step, eachslice(x, dims = 2), init = (o₀, s₀))
-    map(first, os)'
+    reduce(hcat, map(first, os))
 end
 
 
@@ -271,7 +271,7 @@ recursive_forward(layer, x) ≈ batch_forward(layer, x)
 # o_n & = Q_n \gamma^ne^{in\theta} \sum_{m=1}^n  (K_m \gamma^{-m} e^{in\theta})^{\mathrm{T}} v_m
 # \end{aligned}
 # ```
-# now imagine that we compute only items of the output higher than some $n_0.$ We can therefore precompute
+# now imagine that we compute only items of the output higher than some ``n_0.`` We can therefore precompute
 # part of the sum ``R_{n_0} = \sum_{m=1}^{n_0-1}  (K_m \gamma^{-m} e^{in\theta})^{\mathrm{T}} v_m`` with which 
 # the items ``o_n, n \geq n_0`` can be computed as
 # ```math
@@ -282,17 +282,18 @@ recursive_forward(layer, x) ≈ batch_forward(layer, x)
 # wishes to compute chunks in paralel.
 
 function chunked_forward(layer::RetentionLayer, x; chunk_size = 64)
+    T = eltype(layer.Wq)
     Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
     K = rotary_embedding(layer.Wk * x, -layer.θₐ)
     v = layer.Wv * x
-    R₀ = zeros(eltype(v), size(K,1))
+    R₀ = zeros(T, size(layer.Wk, 1), size(layer.Wv, 1))
     os = map(1:chunk_size:size(v,2)) do n₀
         n₁ = min(n₀ + chunk_size - 1, size(v,2))
         Qᵢ = Q[:, n₀:n₁]
         Kᵢ = K[:, n₀:n₁]
         vᵢ = v[:, n₀:n₁]
         Dᵢ = DMatrix(layer.γ, size(Qᵢ, 2));
-        Rᵢ = sum(layer.γ^(-m) * K[:,m] * v[m] for m in 1:n₀-1; init = R₀)
+        Rᵢ = sum(layer.γ^(-m) * K[:,m] * v[:,m]' for m in 1:n₀-1; init = R₀)
         oᵢ = transpose(((Qᵢ' * Kᵢ) .* Dᵢ) * vᵢ') .+ γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ)
     end
     reduce(hcat, os)
@@ -300,36 +301,58 @@ end
 
 chunked_forward(layer, x; chunk_size = 4) ≈ batch_forward(layer, x)
 
-# Let's now investigate, how the time of different implementations
+# Let's now test if the value does not have to be scalar, but it can be a vector. It should be
+# just a matter of changing the size of matrix `Wv`. We add one more constructor, and 
+# fix few bugs to make sure that everything works well (already applied fixed). 
 
-layer = RetentionLayer(6, 8)
+function RetentionLayer(input_dim, hidden_dim, output_dim; γ = 0.99f0, T = Float32)
+    θₐ = T.(2π .* rand(hidden_dim ÷ 2))
+    Wk = randn(T, hidden_dim, input_dim)
+    Wq = randn(T, hidden_dim, input_dim)
+    Wv = randn(T, output_dim, input_dim)
+    γ = T(0.95)
+    RetentionLayer(θₐ, Wk, Wq, Wv, γ)
+end
+
+layer = RetentionLayer(8, 8, 8)
+x = randn(Float32, 8, 256)
+chunked_forward(layer, x; chunk_size = 64) ≈ batch_forward(layer, x)
+recursive_forward(layer, x) ≈ batch_forward(layer, x)
+ 
+
+# Let's now compare the speed of different implementations
+
+layer = RetentionLayer(8, 8)
 map(4:14) do i
-    x = randn(Float32, 6, 2^i)
+    x = randn(Float32, 8, 2^i)
     (;
     sequence_length = 2^i,
     recurrent = (@elapsed recursive_forward(layer, x)),
     batch = (@elapsed batch_forward(layer, x)),
     chunked_16 = (@elapsed chunked_forward(layer, x; chunk_size = 16)),
     chunked_64 = (@elapsed chunked_forward(layer, x; chunk_size = 64)),
+    chunked_256 = (@elapsed chunked_forward(layer, x; chunk_size = 256)),
     )
 end |> DataFrame
 
 # Which gives the following timing
 # ```
-#  Row │ sequence_length  recurrent    batch        chunked_16   chunked_64
-#      │ Int64            Float64      Float64      Float64      Float64
-# ─────┼─────────────────────────────────────────────────────────────────────
-#    1 │              16  9.5708e-5    1.875e-5     2.975e-5     6.791e-6
-#    2 │              32  2.9583e-5    1.3292e-5    2.3625e-5    1.2667e-5
-#    3 │              64  3.7042e-5    6.0542e-5    0.000103125  5.6708e-5
-#    4 │             128  5.05e-5      0.000121458  0.000120792  8.0416e-5
-#    5 │             256  9.7125e-5    0.000556584  0.000434958  0.000208458
-#    6 │             512  0.000180959  0.00212967   0.00147575   0.00470637
-#    7 │            1024  0.000327375  0.00916213   0.00537783   0.00258329
-#    8 │            2048  0.000589917  0.0301123    0.0241839    0.0068275
-#    9 │            4096  0.00116263   0.185624     0.0980744    0.02567
-#   10 │            8192  0.00293392   1.03431      0.425546     0.106468
-#   11 │           16384  0.00690087   4.83593      1.79971      0.422945
+#  Row │ sequence_length  recurrent    batch        chunked_16   chunked_64   chunked_256
+#      │ Int64            Float64      Float64      Float64      Float64      Float64
+# ─────┼──────────────────────────────────────────────────────────────────────────────────
+#    1 │              16  6.25e-5      1.275e-5     1.8708e-5    5.417e-6     5.292e-6
+#    2 │              32  2.8708e-5    1.5583e-5    1.8708e-5    1.1334e-5    1.0375e-5
+#    3 │              64  4.4875e-5    3.1041e-5    4.6875e-5    3.2458e-5    3.0292e-5
+#    4 │             128  8.2584e-5    0.000107583  0.000167292  8.1e-5       0.00010925
+#    5 │             256  0.00015075   0.00046225   0.000606042  0.00485371   0.000414292
+#    6 │             512  0.000283459  0.00168833   0.00205875   0.000634333  0.000844542
+#    7 │            1024  0.000480084  0.00844817   0.00821817   0.00192354   0.00163133
+#    8 │            2048  0.000851167  0.0250193    0.0316693    0.00868054   0.00414017
+#    9 │            4096  0.00272846   0.125775     0.128583     0.0318552    0.0134293
+#   10 │            8192  0.00445004   0.740209     0.47801      0.11457      0.0372682
+#   11 │           16384  0.00708088   3.60559      1.87253      0.480278     0.147014
 # ```
-    
+#
+# The full version of the code can be found at [retnet_1.jl](retnet_1.jl)
+#
 

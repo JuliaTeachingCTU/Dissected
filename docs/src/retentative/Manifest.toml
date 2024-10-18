@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.11.0"
+julia_version = "1.11.1"
 manifest_format = "2.0"
-project_hash = "b86646b247a4e749f3873f96d009171fd2d8cf1a"
+project_hash = "c37d3318aaa6a321db1c996ab2ce5ac8713f09b3"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -1347,6 +1347,12 @@ version = "1.11.0"
 [[deps.Profile]]
 uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 version = "1.11.0"
+
+[[deps.ProfileCanvas]]
+deps = ["Base64", "JSON", "Pkg", "Profile", "REPL"]
+git-tree-sha1 = "e42571ce9a614c2fbebcaa8aab23bbf8865c624e"
+uuid = "efd6af41-a80b-495e-886c-e51b0c7d77a3"
+version = "0.1.6"
 
 [[deps.ProgressLogging]]
 deps = ["Logging", "SHA", "UUIDs"]
