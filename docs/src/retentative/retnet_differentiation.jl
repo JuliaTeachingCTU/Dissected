@@ -209,12 +209,17 @@ end
 # By comparing the output of Zygote with the finite difference approximation, we can see that the
 # that the implementation is correct. We can now move to the multi-threaded version.
 
-Q = randn(8,17);
-K = randn(8,17);
-V = randn(6,17);
+Q = randn(8,127);
+K = randn(8,127);
+V = randn(6,127);
 γs = [0.99, 0.95];
 
 gradient(Q -> sum(linear_attention(Q, K, V, γs)), Q)[1] ≈ grad(central_fdm(5,1), Q -> sum(linear_attention(Q, K, V, γs)), Q)[1]
 gradient(K -> sum(linear_attention(Q, K, V, γs)), K)[1] ≈ grad(central_fdm(5,1), K -> sum(linear_attention(Q, K, V, γs)), K)[1]
 gradient(V -> sum(linear_attention(Q, K, V, γs)), V)[1] ≈ grad(central_fdm(5,1), V -> sum(linear_attention(Q, K, V, γs)), V)[1]
 gradient(γs -> sum(linear_attention(Q, K, V, γs)), γs)[1] ≈ grad(central_fdm(5,1), γs -> sum(linear_attention(Q, K, V, γs)), γs)[1]
+
+
+# Let's now test if we can take a gradient through the retnet
+
+RetentionLayer(32, 32, 32)
