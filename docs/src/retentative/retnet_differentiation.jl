@@ -87,7 +87,7 @@ K = randn(8,17);
 V = randn(6,17);
 γ = 0.99;
 
-gradient(Q -> sum(linear_attention(Q, K, V, γ)), Q)[1] ≈ grad(central_fdm(5,1), Q -> sum(linear_attention(Q, K, V, γ)), Q)[1]
+# gradient(Q -> sum(linear_attention(Q, K, V, γ)), Q)[1] ≈ grad(central_fdm(5,1), Q -> sum(linear_attention(Q, K, V, γ)), Q)[1]
 # Which fails with an error
 # ```julia
 # Stacktrace:
@@ -107,9 +107,8 @@ gradient(Q -> sum(linear_attention(Q, K, V, γ)), Q)[1] ≈ grad(central_fdm(5,1
 
 # Let's now move to our implementation of the linear attention with for-cycles. The process of writing
 # is similar to the rotaty embedding. We take the forward pass and use it as a template to write 
-# the backward pass. As always, we first write make the function correct, without multi-threadding
-# and all that stuff, and then make it performant if possible. Adding threads might be tricky, because
-# we need to ensure that there will not be any race condition and we want to avoid locks if possible.
+# the backward pass. As always, we first write make the function correct, without multi-threadding.
+# Recall the implementation of the forward part with heas is as follows
 
 function _slices(hidden_dim::Integer, output_dim::Integer, nheads::Integer)
     head_dim = hidden_dim ÷ nheads
@@ -146,6 +145,12 @@ function linear_attention(Q, K, V, γs::AbstractVector{<:Number})
     o
 end
 
+# Assuming the gradient with respect to the output of `linear_attention` is `ȳ`, 
+# gradients with respect to arguments are written as follows. Notice that below, we mostly
+# use the differentiation rule for `+` and `*`. We need to recompute `α`, and there is a little
+# but of hassle with `γ`. Otherwise, it is mostly straightforward. Once we have the function to 
+# compute the gradient, we register it with Zygote.
+
 function ∂linear_attention(ȳ, Q, K, V, γs::AbstractVector{<:Number})
 	T = eltype(Q)
 	Q̄ = similar(Q)
@@ -161,13 +166,13 @@ function ∂linear_attention(ȳ, Q, K, V, γs::AbstractVector{<:Number})
     for n in 1:l
         for (j, (kvslice, oslice)) in enumerate(zip(kvslices, oslices))
             for m in 1:n
-            	# we need to recompute the alpha for the gradient
+            	## we need to recompute the alpha for the gradient
                 α = zero(T)
                 for k in kvslice
                     α += Q[k, n] * K[k, m]
                 end
 
-                # then we compute the gradient of the output with respect to α and γ
+                ## then we compute the gradient of the output with respect to α and γ
                 γ = γs[j]^(n-m)
             	∂α = zero(T)
             	∂γ = zero(T)
@@ -177,13 +182,13 @@ function ∂linear_attention(ȳ, Q, K, V, γs::AbstractVector{<:Number})
                     V̄[k, m] += ȳ[k,n] * γ * α
                 end
 
-                # with that we update the gradient of Q and K
+                ## with that we update the gradient of Q and K
                 for k in kvslice
                     Q̄[k,n] += ∂α * K[k, m]
                     K̄[k,m] += ∂α * Q[k, n]
                 end
 
-                # and finally we updaate the gradient of γ
+                ## and finally we updaate the gradient of γ
                 γ̄s[j] += n != m ? (n-m)*γs[j]^(n-m-1)*∂γ : zero(T)
             end
         end
