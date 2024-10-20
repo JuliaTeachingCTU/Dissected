@@ -100,7 +100,7 @@ end
 function recursive_forward(layer::RetentionLayer{<:Vector}, x)
     Wk, Wq, Wv, θₐ, γs = layer.Wk, layer.Wq, layer.Wv, layer.θₐ, layer.γ
     kvslices, oslices = _slices(Wk, Wv, γs)
-    θ_dim = head_dim ÷ 2
+    θ_dim = length(first(kvslices)) ÷ 2
     os = map(enumerate(zip(γs, kvslices, oslices))) do (i, (γ, kvslice, oslice))
         θᵢ = θₐ[(i-1)*θ_dim+1:i*θ_dim]
         recursive_forward(Wq[kvslice,:], Wk[kvslice,:], Wv[oslice,:], γ, θᵢ, x)
@@ -138,17 +138,17 @@ function batch_forward(layer::RetentionLayer, x; chunk_size = typemax(Int64))
     linear_attention(Q, K, v, layer.γ, chunk_size)
 end
 
-function linear_attention(Q, K, V, γ::Real, chunk_size)
-    chunk_size < size(V,2) && return(_chunked_linear_attention(Q, K, V, γ, chunk_size))
-    _linear_attention(Q, K, V, γ)
-end
-
 function linear_attention(Q, K, V, γs::Vector{<:Real}, chunk_size)
     kvslices, oslices = _slices(Q, K, γs)
     os = map(enumerate(zip(γs, kvslices, oslices))) do (i, (γ, kvslice, oslice))
         linear_attention(Q[kvslice,:], K[kvslice,:], V[oslice,:], γ, chunk_size)
     end
     reduce(vcat, os)
+end
+
+function linear_attention(Q, K, V, γ::Real, chunk_size)
+    chunk_size < size(V,2) && return(_chunked_linear_attention(Q, K, V, γ, chunk_size))
+    _linear_attention(Q, K, V, γ)
 end
 
 function _linear_attention(Q, K, V, γ::Real)
@@ -169,6 +169,8 @@ function _chunked_linear_attention(Q, K, V, γ::Real, chunk_size)
     reduce(hcat, os)
 end
 
+
+
 #
 # Now we test that all implementations matches the naive approach where layers are run 
 # completely in parallel.
@@ -187,3 +189,28 @@ recursive_forward(layer, x) ≈ ref_o
 batch_forward(layer, x) ≈ ref_o
 batch_forward(layer, x;chunk_size = 16) ≈ ref_o
 batch_forward(layer, x;chunk_size = 64) ≈ ref_o
+recursive_forward(layer, x) ≈ batch_forward(layer, x)
+
+
+nheads = 4
+head_dim = 8
+hidden_dim = head_dim*nheads
+layer = RetentionLayer(hidden_dim, hidden_dim, hidden_dim; nheads)
+θ_dim = head_dim ÷ 2
+
+layers = map(zip(1:head_dim:hidden_dim, 1:θ_dim:length(layer.θₐ), layer.γ)) do (i,j,γ)
+    ii = i:i+head_dim-1
+    jj = j:j+θ_dim-1
+    RetentionLayer(layer.θₐ[jj], layer.Wk[ii,:], layer.Wq[ii,:], layer.Wv[ii,:], γ)
+end
+
+x = rand(Float32, hidden_dim, 257)
+ref_o = vcat(map(l -> recursive_forward(l, x), layers)...)
+
+recursive_forward(layer, x) ≈ ref_o
+batch_forward(layer, x) ≈ ref_o
+batch_forward(layer, x;chunk_size = 16) ≈ ref_o
+batch_forward(layer, x;chunk_size = 64) ≈ ref_o
+recursive_forward(layer, x) ≈ batch_forward(layer, x)
+
+
