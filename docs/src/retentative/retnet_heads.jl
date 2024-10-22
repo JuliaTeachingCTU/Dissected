@@ -214,3 +214,10 @@ batch_forward(layer, x;chunk_size = 64) ≈ ref_o
 recursive_forward(layer, x) ≈ batch_forward(layer, x)
 
 
+
+
+layer = RetentionLayer(32, 32, 32; nheads = 1)
+x = randn(32, 128)
+println("maxdiff: ", maximum(abs.(batch_forward(layer, x; chunk_size = 16) .- batch_forward(layer, x))))
+batch_forward(layer, x; chunk_size = 16) ≈ batch_forward(layer, x)
+

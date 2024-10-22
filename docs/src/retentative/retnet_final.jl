@@ -1,7 +1,15 @@
-using ChainRulesCore
+# # Adding more heads to retnet
+# 
+# We start by copying the prerequisities from the last time, mainly the `rot_matrix`, `rotary_embedding`
+# and decayed masking matrix `DMatrix`.
+using LinearAlgebra
+using Test
 using FiniteDifferences
+using ChainRulesCore
 using Zygote
+using Flux
 
+#
 struct DMatrix{T} <:AbstractMatrix{T}
     γ::T
     size::Int64
@@ -11,8 +19,6 @@ Base.getindex(d::DMatrix{T}, n::Integer, m::Integer) where {T} = n ≥ m ? d.γ^
 Base.size(d::DMatrix,i::Integer) = d.size
 Base.size(d::DMatrix) = (d.size, d.size)
 
-
-# Define the rotary ebedding and its gradient
 function rot_matrix(θ::Vector)
     o = zeros(eltype(θ), 2*length(θ), 2*length(θ))
     for k in 1:length(θ)
@@ -67,120 +73,13 @@ function ChainRulesCore.rrule(::typeof(rotary_embedding), x::AbstractMatrix, θ:
     return y, rotary_pullback
 end
 
+# The type defining the Retentanive layer for multiple heads can be left as is. The only 
+# difference between single-head and multiple-heads is that the `γ` is a vector 
+# instead of a scalar. Thought the constructor is much-more sophisticated, since 
+# we need to make sure that the number of heads divides the hidden dimension and dimension
+# of the head is even.
 
-function linear_attention_single_thread(Q, K, V, nheads, γs)
-    kvslices, oslices = _slices(K, V, nheads)
-    o = zeros(eltype(V), size(V))
-    l = size(K,2)
-    for n in 1:l
-        for (j, (kvslice, oslice)) in enumerate(zip(kvslices, oslices))
-            for m in 1:n
-                α = zero(eltype(Q))
-                for k in kvslice
-                    α += Q[k, n] * K[k, m]
-                end
-
-                γ = γs[j]^(n-m)
-                for k in oslice
-                    o[k, n] += γ * α * V[k, m]
-                end
-            end
-        end
-    end
-    o
-end
-
-function linear_attention_multi_thread(Q, K, V, nheads, γs)
-    kvslices, oslices = _slices(K, V, nheads)
-    o = zeros(eltype(V), size(V))
-    l = size(K,2)
-    Threads.@threads :static for i in 1:Threads.nthreads()
-        for n in i:Threads.nthreads():l
-            for (j, (kvslice, oslice)) in enumerate(zip(kvslices, oslices))
-                @inbounds for m in 1:n
-                    α = zero(eltype(Q))
-                    for k in kvslice
-                        α += Q[k, n] * K[k, m]
-                    end
-
-                    γ = γs[j]^(n-m)
-                    for k in oslice
-                        o[k, n] += γ * α * V[k, m]
-                    end
-                end
-            end
-        end
-    end
-    o
-end
-
-function linear_attention(Q, K, V, nheads, γs)
-    if Threads.nthreads() == 1 
-        linear_attention_single_thread(Q, K, V, nheads, γs)
-    else
-        linear_attention_multi_thread(Q, K, V, nheads, γs)
-    end
-end
-
-function ∂linear_attention(ȳ, Q, K, V, nheads, γs::AbstractVector{<:Number})
-    T = eltype(Q)
-    Q̄ = similar(Q)
-    K̄ = similar(K)
-    V̄ = similar(V)
-    γ̄s = similar(γs)
-    Q̄ .= 0
-    K̄ .= 0
-    V̄ .= 0
-    γ̄s .= 0
-    kvslices, oslices = _slices(K,V,nheads)
-    l = size(K,2)
-    for n in 1:l
-        for (j, (kvslice, oslice)) in enumerate(zip(kvslices, oslices))
-            for m in 1:n
-                ## we need to recompute the alpha for the gradient
-                α = zero(T)
-                for k in kvslice
-                    α += Q[k, n] * K[k, m]
-                end
-
-                ## then we compute the gradient of the output with respect to α and γ
-                γ = γs[j]^(n-m)
-                ∂α = zero(T)
-                ∂γ = zero(T)
-                for k in oslice
-                    ∂γ += ȳ[k,n] * α * V[k, m]
-                    ∂α += ȳ[k,n] * γ * V[k, m]
-                    V̄[k, m] += ȳ[k,n] * γ * α
-                end
-
-                ## with that we update the gradient of Q and K
-                for k in kvslice
-                    Q̄[k,n] += ∂α * K[k, m]
-                    K̄[k,m] += ∂α * Q[k, n]
-                end
-
-                ## and finally we updaate the gradient of γ
-                γ̄s[j] += n != m ? (n-m)*γs[j]^(n-m-1)*∂γ : zero(T)
-            end
-        end
-    end
-    return(Q̄, K̄, V̄, γ̄s)
-end
-
-function ChainRulesCore.rrule(::typeof(linear_attention), Q, K, V, nheads, γs::AbstractVector{<:Number})
-    y = linear_attention(Q,K,V,γs)
-    function linatt_pullback(ȳ)
-        f̄ = NoTangent()
-        Q̄, K̄, V̄, γ̄s = ∂linear_attention(ȳ, Q, K, V, nheads, γs)
-        return f̄, Q̄, K̄, V̄, γ̄s
-    end
-    return y, linatt_pullback
-end
-
-
-
-# Retention Layer
-struct RetentionLayer{N, G<:AbstractVector,Θ<:AbstractVector,M<:AbstractMatrix}
+struct RetentionLayer{N,G,Θ,M}
     θₐ::Θ
     Wk::M
     Wq::M
@@ -189,19 +88,32 @@ struct RetentionLayer{N, G<:AbstractVector,Θ<:AbstractVector,M<:AbstractMatrix}
     nheads::Val{N}
 end
 
-function RetentionLayer(input_dim, hidden_dim, output_dim; nheads = 1, T = Float32)
+Flux.@layer RetentionLayer
+
+function RetentionLayer(input_dim, hidden_dim, output_dim; nheads = 1, γ = 0.99, T = Float32)
    θₐ = T.(2π .* rand(hidden_dim ÷ 2))
    Wk = randn(T, hidden_dim, input_dim)
    Wq = randn(T, hidden_dim, input_dim)
    Wv = randn(T, output_dim, input_dim)
-
-   γs = (nheads > 1) ? 1 .- exp.(range(-log(512),-log(32), length = nheads)) : [1 - exp(-log(512.0))]
-   mod(size(Wk, 1), nheads) != 0 && error("The number of heads does not divide the hidden dimension")
-   mod(size(Wv, 1), nheads) != 0 && error("The number of heads does not divide the output dimension")
-   RetentionLayer(θₐ, Wk, Wq, Wv, T.(γs),Val(nheads))
+   nheads = max(nheads, length(γ))
+   if nheads == 1
+       RetentionLayer(θₐ, Wk, Wq, Wv, T(only(γ)), Val(1))
+   else
+       if length(γ) != nheads
+           length(γ) > 1 && @info "The length of `γ` is not equal to the number of heads, using default setting `1 .- exp.(range(-log(512),-log(32), length = nheads))`"
+           γ = 1 .- exp.(range(-log(512),-log(32), length = nheads))
+       end
+       head_dim = size(Wk, 1) ÷ length(γ)
+       head_dim * length(γ) != size(Wk, 1) && error("The number of heads does not divide the hidden dimension")
+       RetentionLayer(θₐ, Wk, Wq, Wv, T.(γ), Val(nheads))
+   end
 end
 
 Base.show(io::IO, m::RetentionLayer{N}) where {N} = print(io, "RetentionLayer($(size(m.Wk,2)) => $(size(m.Wk,1))) with $(N) heads")
+
+function recursive_forward(layer::RetentionLayer{1,<:Real}, x)
+    recursive_forward(layer.Wq, layer.Wk, layer.Wv, layer.γ, layer.θₐ, x)
+end
 
 
 # The retention layer for multiple heads behave like a stacked single layers. So the first 
@@ -216,12 +128,17 @@ function _slices(hidden_dim::Integer, output_dim::Integer, nheads::Val{N}) where
     return(kvslices, oslices)
 end
 
-_slices(layer::RetentionLayer) = _slices(size(layer.Wk,1), size(layer.Wv,1), layer.nheads)
-_slices(K::AbstractMatrix, V::AbstractMatrix, nheads) = _slices(size(K,1), size(V,1), layer.nheads)
+function _slices(K::AbstractMatrix, V::AbstractMatrix, γs::AbstractVector)
+    _slices(size(K,1), size(V,1), Val(length(γs)))
+end
 
-function recursive_forward(layer::RetentionLayer, x)
+function _slices(layer::RetentionLayer)
+    _slices(size(layer.Wk,1), size(layer.Wv,1), layer.nheads)
+end
+
+function recursive_forward(layer::RetentionLayer{N,<:AbstractVector}, x) where {N}
     Wk, Wq, Wv, θₐ, γs = layer.Wk, layer.Wq, layer.Wv, layer.θₐ, layer.γ
-    kvslices, oslices = _slices(Wk, Wv, γs)
+    kvslices, oslices = _slices(layer)
     θ_dim = length(first(kvslices)) ÷ 2
     os = map(enumerate(zip(γs, kvslices, oslices))) do (i, (γ, kvslice, oslice))
         θᵢ = θₐ[(i-1)*θ_dim+1:i*θ_dim]
@@ -256,69 +173,212 @@ end
 function batch_forward(layer::RetentionLayer, x; chunk_size = typemax(Int64))
     Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
     K = rotary_embedding(layer.Wk * x, -layer.θₐ)
-    V = layer.Wv * x
-    linear_attention(Q, K, V, layer.nheads, layer.γ, chunk_size)
+    v = layer.Wv * x
+    linear_attention(Q, K, v, layer.γ, chunk_size)
 end
 
-function linear_attention(Q, K, V, nheads, γs, chunk_size)
-    if chunk_size == typemax(Int64)
-        linear_attention(Q, K, V, nheads, γs)
-    else
-        chunked_linear_attention(Q, K, V, nheads, γs, chunk_size)
+function linear_attention(Q, K, V, γ, chunk_size)
+    chunk_size < size(V,2) && return(_chunked_linear_attention(Q, K, V, γ, chunk_size))
+    linear_attention(Q, K, V, γ)
+end
+
+function linear_attention(Q, K, V, γ::Real)
+    D = DMatrix(γ, size(Q, 2));
+    transpose(((Q' * K) .* D) * V')
+end
+
+function linear_attention(Q, K, V, γs::AbstractVector{<:Real})
+    kvslices, oslices = _slices(Q, V, γs)
+    os = map(enumerate(zip(γs, kvslices, oslices))) do (i, (γ, kvslice, oslice))
+        linear_attention(Q[kvslice,:], K[kvslice,:], V[oslice,:], γ)
     end
+    reduce(vcat, os)
 end
 
-function chunked_linear_attention(Q, K, V, nheads, γs, chunk_size)
+# function _chunked_linear_attention(Q, K, V, γ::Real, chunk_size)
+#     R₀ = zeros(eltype(V), size(K, 1), size(V, 1))
+#     os = map(1:chunk_size:size(V,2)) do n₀
+#         n₁ = min(n₀ + chunk_size - 1, size(V,2))
+#         Qᵢ = Q[:, n₀:n₁]
+#         Kᵢ = K[:, n₀:n₁]
+#         Vᵢ = V[:, n₀:n₁]
+#         Rᵢ = sum(γ^(-m) * K[:,m] * V[:,m]' for m in 1:n₀-1; init = R₀)
+#         oᵢ = linear_attention(Qᵢ, Kᵢ, Vᵢ, γ) .+ γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ)
+#     end
+#     reduce(hcat, os)
+# end
+
+
+function _chunked_linear_attention(Q, K, V, γ, chunk_size)
     os = map(1:chunk_size:size(V,2)) do n₀
         n₁ = min(n₀ + chunk_size - 1, size(V,2))
         Qᵢ = Q[:, n₀:n₁]
         Kᵢ = K[:, n₀:n₁]
         Vᵢ = V[:, n₀:n₁]
-        oᵢ = linear_attention(Qᵢ, Kᵢ, Vᵢ, nheads, γs) .+ from_previous_chunks(Qᵢ, K, V, nheads, γs, n₀, n₁)
+        CCᵢ = cross_retention(Qᵢ, K, V, γ, n₀, n₁)
+        oᵢ = linear_attention(Qᵢ, Kᵢ, Vᵢ, γ) .+ CCᵢ
     end
     reduce(hcat, os)
 end
 
-function from_previous_chunks(Qᵢ, K, V, nheads, γs::Vector{<:Real}, n₀, n₁)
+function cross_retention(Qᵢ, K, V, γ::Real, n₀, n₁)
+    n₀ ≤ 1 && return(zeros(eltype(V), size(V, 1), n₁ - n₀ + 1))
+    Rᵢ = sum(γ^(-m) * K[:,m] * V[:,m]' for m in 1:n₀-1)
+    CCᵢ = γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ)
+    CCᵢ
+end
+
+function cross_retention(Qᵢ, K, V, γₛ::AbstractVector{<:Real}, n₀, n₁)
+    n₀ ≤ 1 && return(zeros(eltype(V), size(V, 1), n₁ - n₀ + 1))
+    kvslices, oslices = _slices(K, V, γₛ)
+    CCᵢ =map(zip(kvslices, oslices, γₛ)) do (kvslice, oslice, γ)
+        Rᵢ = sum(γ^(-m) * K[kvslice,m] * V[oslice,m]' for m in 1:n₀-1)
+        γ .^ (n₀:n₁)'  .* (Rᵢ' * Qᵢ[kvslice,:])
+    end
+    reduce(vcat, CCᵢ)
+end
+
+function _linear_attention_forloop(Q, K, V, γs::AbstractVector)
+    _linear_attention_forloop(Q, K, V, nheads, Val(length(γs)), γs)
+end
+
+function _linear_attention_forloop(Q, K, V, nheads, γs)
     kvslices, oslices = _slices(K, V, nheads)
-    parts = map(zip(kvslices, oslices, γs)) do (kvslice, oslice, γ)
-        R₀ = zeros(eltype(V), length(kvslice), length(oslice))
-        R = sum(γ^(-m) * view(K, kvslice, m) * view(V, oslice, m)' for m in 1:n₀-1; init = R₀)
-        return(γ .^ (n₀:n₁)'  .* (R' * view(Qᵢ, kvslice, :)))
+    o = zeros(eltype(V), size(V))
+    l = size(K,2)
+    Threads.@threads :static for i in 1:Threads.nthreads()
+        for n in i:Threads.nthreads():l
+            for (j, (kvslice, oslice)) in enumerate(zip(kvslices, oslices))
+                @inbounds for m in 1:n
+                    α = zero(eltype(Q))
+                    for k in kvslice
+                        α += Q[k, n] * K[k, m]
+                    end
+
+                    γ = γs[j]^(n-m)
+                    for k in oslice
+                        o[k, n] += γ * α * V[k, m]
+                    end
+                end
+            end
+        end
     end
-    reduce(vcat, parts)
+    o
 end
 
-
-
-function batch_forward2(layer::RetentionLayer, x)
-    Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
-    K = rotary_embedding(layer.Wk * x, -layer.θₐ)
-    v = layer.Wv * x
-    linear_attention2(Q, K, v, layer.γ)
+function ∂linear_attention(ȳ, Q, K, V, γs::AbstractVector{<:Number})
+    ∂linear_attention(ȳ, Q, K, V, γs, Val(length(γs)))
 end
 
-function linear_attention2(Q, K, V, γs::Vector{<:Real})
-    kvslices, oslices = _slices(Q, K, γs)
-    os = map(enumerate(zip(γs, kvslices, oslices))) do (i, (γ, kvslice, oslice))
-        linear_attention2(Q[kvslice,:], K[kvslice,:], V[oslice,:], γ)
+function ∂linear_attention(ȳ, Q, K, V, γs::AbstractVector{<:Number}, nheads::Val)
+    T = eltype(Q)
+    Q̄ = similar(Q)
+    K̄ = similar(K)
+    V̄ = similar(V)
+    γ̄s = similar(γs)
+    Q̄ .= 0
+    K̄ .= 0
+    V̄ .= 0
+    γ̄s .= 0
+    kvslices, oslices = _slices(K,V,γs)
+    l = size(K,2)
+    for n in 1:l
+        for (j, (kvslice, oslice)) in enumerate(zip(kvslices, oslices))
+            for m in 1:n
+                ## we need to recompute the alpha for the gradient
+                α = zero(T)
+                for k in kvslice
+                    α += Q[k, n] * K[k, m]
+                end
+
+                ## then we compute the gradient of the output with respect to α and γ
+                γ = γs[j]^(n-m)
+                ∂α = zero(T)
+                ∂γ = zero(T)
+                for k in oslice
+                    ∂γ += ȳ[k,n] * α * V[k, m]
+                    ∂α += ȳ[k,n] * γ * V[k, m]
+                    V̄[k, m] += ȳ[k,n] * γ * α
+                end
+
+                ## with that we update the gradient of Q and K
+                for k in kvslice
+                    Q̄[k,n] += ∂α * K[k, m]
+                    K̄[k,m] += ∂α * Q[k, n]
+                end
+
+                ## and finally we updaate the gradient of γ
+                γ̄s[j] += n != m ? (n-m)*γs[j]^(n-m-1)*∂γ : zero(T)
+            end
+        end
     end
-    reduce(vcat, os)
+    return(Q̄, K̄, V̄, γ̄s)
 end
 
-function linear_attention2(Q, K, V, γ::Real)
-    _linear_attention2(Q, K, V, γ)
+function ∂linear_attention(ȳ, Q, K, V, γ::Real)
+    Q̄, K̄, V̄, γ̄s = ∂linear_attention(ȳ, Q, K, V, [γ])
+    Q̄, K̄, V̄, only(γ̄s)
 end
 
-function _linear_attention2(Q, K, V, γ::Real)
-    D = DMatrix(γ, size(Q, 2));
-    transpose(((Q' * K) .* D) * V')
+function ChainRulesCore.rrule(::typeof(linear_attention), Q, K, V, γs, chunk_size)
+    y = linear_attention(Q, K, V, γs, chunk_size)
+    function linatt_pullback(ȳ)
+        f̄ = NoTangent()
+        Q̄, K̄, V̄, γ̄s = ∂linear_attention(ȳ, Q, K, V, γs)
+        return f̄, Q̄, K̄, V̄, γ̄s, NoTangent()
+    end
+    return y, linatt_pullback
+end
+
+@testset "Gradient of linear attention" begin 
+    Q = randn(8,127);
+    K = randn(8,127);
+    V = randn(6,127);
+    @testset "γ = $(γ)" for γ in (0.95, [0.99, 0.95], rand(4))
+        γ = 0.95;
+        @testset "chunk_size = $(chunk_size)" for chunk_size in [32, 64, 128]
+            @test gradient(Q -> sum(linear_attention(Q, K, V, γ, chunk_size)), Q)[1] ≈ grad(central_fdm(5,1), Q -> sum(linear_attention(Q, K, V, γ, chunk_size)), Q)[1]
+            @test gradient(K -> sum(linear_attention(Q, K, V, γ, chunk_size)), K)[1] ≈ grad(central_fdm(5,1), K -> sum(linear_attention(Q, K, V, γ, chunk_size)), K)[1]
+            @test gradient(V -> sum(linear_attention(Q, K, V, γ, chunk_size)), V)[1] ≈ grad(central_fdm(5,1), V -> sum(linear_attention(Q, K, V, γ, chunk_size)), V)[1]
+            @test gradient(γ -> sum(linear_attention(Q, K, V, γ, chunk_size)), γ)[1] ≈ grad(central_fdm(5,1), γ -> sum(linear_attention(Q, K, V, γ, chunk_size)), γ)[1]
+        end
+    end
 end
 
 
-layer = RetentionLayer(32,32,32, nheads = 2)
-x = randn(32, 127)
+@testset "RetNet" begin 
+    @testset "correctness of forward pass $(nheads)" for nheads in [1,2,3,4]
+        head_dim = rand([2,4,8])
+        odim = nheads * rand([2,4,8])
+        hidden_dim = head_dim*nheads
+        layer = RetentionLayer(hidden_dim, hidden_dim, odim; nheads)
+        θ_dim = head_dim ÷ 2
 
-batch_forward(layer, x) ≈ recursive_forward(layer, x)
-batch_forward2(layer, x) ≈ recursive_forward(layer, x)
-batch_forward(layer, x) ≈ batch_forward2(layer, x)
+        layers = map(zip(1:head_dim:hidden_dim, 1:θ_dim:length(layer.θₐ), 1:(odim÷nheads):odim, layer.γ)) do (i,j,o,γ)
+            ii = i:i+head_dim-1
+            jj = j:j+θ_dim-1
+            oo = o:(o+odim ÷ nheads -1)
+            RetentionLayer(layer.θₐ[jj], layer.Wk[ii,:], layer.Wq[ii,:], layer.Wv[oo,:], γ, Val(1))
+        end
+
+        x = rand(Float32, hidden_dim, 257)
+        ref_o = vcat(map(l -> recursive_forward(l, x), layers)...)
+
+        @test recursive_forward(layer, x) ≈ ref_o
+        @test batch_forward(layer, x) ≈ ref_o
+        @test batch_forward(layer, x;chunk_size = 16) ≈ ref_o
+        @test batch_forward(layer, x;chunk_size = 64) ≈ ref_o
+        @test recursive_forward(layer, x) ≈ batch_forward(layer, x)
+    end
+
+    @testset "correctness of forward pass $(nheads)" for nheads in [1,2,3,4]
+        head_dim = rand([2,4,8])
+        odim = nheads * rand([2,4,8])
+        hidden_dim = head_dim*nheads
+        layer = RetentionLayer(hidden_dim, hidden_dim, odim; nheads)
+        x = rand(Float32, hidden_dim, 257)
+    
+        gradient(layer -> sum(batch_forward(layer, x)), layer)
+        gradient(layer -> sum(batch_forward(layer, x;chunk_size = 16)), layer)
+    end
+end
