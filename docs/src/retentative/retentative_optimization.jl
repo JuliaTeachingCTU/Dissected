@@ -167,3 +167,31 @@ linear_attention(Q, K, V, γs) ≈ linear_attention4(Q, K, V, γs)
 # We see that the hard work pays off for the multi-head version, which is more than 3 times faster
 # than the version that relies on regular matrix multiplication (6.6ms vs 22ms). For this setting, it alocates less
 # memory (518Kb vs 34Mb), which is sweet.
+
+
+# and we should get rid of power in a thread-safe way
+function linear_attention_forloop(Q, K, V, nheads, γs)
+    kvslices, oslices = _slices(K, V, nheads)
+    o = zeros(eltype(V), size(V))
+    l = size(K,2)
+    Threads.@threads :static for i in 1:Threads.nthreads()
+        for n in i:Threads.nthreads():l
+            for (j, (kvslice, oslice)) in enumerate(zip(kvslices, oslices))
+                γ = γs[j]
+                γₙ = γ ^ n
+                @inbounds for m in 1:n
+                    α = zero(eltype(Q))
+                    for k in kvslice
+                        α += Q[k, n] * K[k, m]
+                    end
+
+                    γₙ /= γ
+                    for k in oslice
+                        o[k, n] += γₙ * α * V[k, m]
+                    end
+                end
+            end
+        end
+    end
+    o
+end

@@ -223,3 +223,57 @@ gradient(γs -> sum(linear_attention(Q, K, V, γs)), γs)[1] ≈ grad(central_fd
 # Let's now test if we can take a gradient through the retnet
 
 RetentionLayer(32, 32, 32)
+
+
+# Its work. But if we look into the profiler, we will see that we spent a lot of time in 
+# "pow" function. We can get rid of it by keeping `γs .^ n` in `γsₙ` and increase it by one 
+# in every iteration.
+
+function ∂linear_attention(ȳ, Q, K, V, γs::AbstractVector{<:Number}, nheads::Val{N}) where {N}
+    T = eltype(Q)
+    Q̄ = similar(Q)
+    K̄ = similar(K)
+    V̄ = similar(V)
+    γ̄s = similar(γs)
+    Q̄ .= 0
+    K̄ .= 0
+    V̄ .= 0
+    γ̄s .= 0
+    kvslices, oslices = _slices(K, V, nheads)
+    l = size(K,2)
+
+    γsₙ = ones(T, length(γs))
+    for n in 1:l
+        γsₙ .*= γs
+        for (j, (γsₘ, kvslice, oslice)) in enumerate(zip(γsₙ, kvslices, oslices))
+            @inbounds for m in 1:n
+                ## we need to recompute the alpha for the gradient
+                α = zero(T)
+                for k in kvslice
+                    α += Q[k, n] * K[k, m]
+                end
+
+                ## then we compute the gradient of the output with respect to α and γ
+                γ = γsₘ / γs[j] # γ = γs[j]^(n-m)
+                ∂α = zero(T)
+                ∂γ = zero(T)
+                for k in oslice
+                    ∂γ += ȳ[k,n] * α * V[k, m]
+                    ∂α += ȳ[k,n] * γ * V[k, m]
+                    V̄[k, m] += ȳ[k,n] * γ * α
+                end
+
+                ## with that we update the gradient of Q and K
+                for k in kvslice
+                    Q̄[k,n] += ∂α * K[k, m]
+                    K̄[k,m] += ∂α * Q[k, n]
+                end
+
+                ## and finally we update the gradient of γ
+                γ̄s[j] += n != m ? (n-m)*γ*∂γ / γs[j] : zero(T)
+            end
+        end
+    end
+    return(Q̄, K̄, V̄, γ̄s)
+end
+

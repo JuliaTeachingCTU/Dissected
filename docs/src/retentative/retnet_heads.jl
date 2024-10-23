@@ -193,7 +193,7 @@ recursive_forward(layer, x) ≈ batch_forward(layer, x)
 
 
 nheads = 4
-head_dim = 8
+head_dim = 32
 hidden_dim = head_dim*nheads
 layer = RetentionLayer(hidden_dim, hidden_dim, hidden_dim; nheads)
 θ_dim = head_dim ÷ 2
@@ -216,7 +216,7 @@ recursive_forward(layer, x) ≈ batch_forward(layer, x)
 
 
 
-layer = RetentionLayer(32, 32, 32; nheads = 1)
+layer = RetentionLayer(32, 32, 32; nheads = 4)
 x = randn(32, 128)
 println("maxdiff: ", maximum(abs.(batch_forward(layer, x; chunk_size = 16) .- batch_forward(layer, x))))
 batch_forward(layer, x; chunk_size = 16) ≈ batch_forward(layer, x)

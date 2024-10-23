@@ -1,0 +1,9 @@
+[deps]
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+FiniteDifferences = "26cc04aa-876d-5657-8c51-4c34ba976000"
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+ProfileCanvas = "efd6af41-a80b-495e-886c-e51b0c7d77a3"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
