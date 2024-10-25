@@ -50,7 +50,7 @@ function linear_attention_forloop(Q, K, V, γs::AbstractVector)
     linear_attention_forloop(Q, K, V, Val(length(γs)), γs)
 end
 
-function linear_attention_forloop(Q, K, V, nheads, γs)
+function linear_attention_forloop(Q, K, V, γs, nheads)
     kvslices, oslices = _slices(K, V, nheads)
     o = zeros(eltype(V), size(V))
     l = size(K,2)
@@ -140,11 +140,25 @@ function linear_attention(Q, K, V, γ)
     linear_attention_forloop(Q, K, V, γ)
 end
 
-function ChainRulesCore.rrule(::typeof(linear_attention), Q, K, V, γs)
-    y = linear_attention_forloop(Q, K, V, γs)
+function linear_attention(Q, K, V, nheads, γ)
+    linear_attention_forloop(Q, K, V, γ, nheads)
+end
+
+function ChainRulesCore.rrule(::typeof(linear_attention), Q, K, V, nheads, γs)
+    y = linear_attention_forloop(Q, K, V, nheads, γs)
     function linatt_pullback(ȳ)
         f̄ = NoTangent()
-        Q̄, K̄, V̄, γ̄s = ∂linear_attention(ȳ, Q, K, V, γs)
+        Q̄, K̄, V̄, γ̄s = ∂linear_attention(ȳ, Q, K, V, nheads, γs)
+        return f̄, Q̄, K̄, V̄, γ̄s, NoTangent()
+    end
+    return y, linatt_pullback
+end
+
+function ChainRulesCore.rrule(::typeof(linear_attention), Q, K, V, nheads, γs)
+    y = linear_attention_forloop(Q, K, V, γs, nheads)
+    function linatt_pullback(ȳ)
+        f̄ = NoTangent()
+        Q̄, K̄, V̄, γ̄s = ∂linear_attention(ȳ, Q, K, V, γs, nheads)
         return f̄, Q̄, K̄, V̄, γ̄s, NoTangent()
     end
     return y, linatt_pullback

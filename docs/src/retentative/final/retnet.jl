@@ -102,27 +102,54 @@ function batch_forward(layer::RetentionLayer, x; chunk_size = typemax(Int64))
     linear_attention(Q, K, v, layer.γ)
 end
 
-
 function chunk_forward(layer::RetentionLayer, x; chunk_size = 64)
     Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
     K = rotary_embedding(layer.Wk * x, -layer.θₐ)
     V = layer.Wv * x
-    rep_γs = repeat_gamma(layer)
+    rep_γs = repeatγ(layer)
     Rᵢ = cross_retention(K, V, layer.γ, 0, layer.nheads)
-    os = map(1:chunk_size:size(V,2)) do n₀
-        Bᵢ = n₀:min(n₀ + chunk_size - 1, size(V,2))
-        Bᵢ₁ = max(1, (n₀ - chunk_size)):(n₀-1)
-        Qᵢ = Q[:, Bᵢ]
-        Kᵢ = K[:, Bᵢ]
-        Vᵢ = V[:, Bᵢ]
-        Rᵢ += cross_retention(K, V, layer.γ, max(1, (n₀ - chunk_size)):(n₀-1), layer.nheads)
-        oᵢ = linear_attention(Qᵢ, Kᵢ, Vᵢ, layer.γ) .+ rep_γs .^ (Bᵢ)'  .* (Rᵢ' * Qᵢ)
+    O₀ = Vector{Matrix{eltype(V)}}()
+    os = foldl(1:chunk_size:size(V,2), init = (O₀, Rᵢ)) do (O₀, Rᵢ), n₀
+        oᵢ, Rᵢ = onechunk_forward(layer, Q, K, V, rep_γs, Rᵢ, chunk_size, n₀)
+        O₀ = vcat(O₀, [oᵢ])
+        (O₀, Rᵢ)
     end
-    reduce(hcat, os)
+    reduce(hcat, first(os))
 end
 
-repeat_gamma(layer::RetentionLayer{1}) = layer.γ
-repeat_gamma(layer::RetentionLayer{N,<:AbstractVector}) where {N} = repeat(layer.γ, inner = size(layer.Wv,1) ÷ N)
+function chunk_forward2(layer::RetentionLayer, x; chunk_size = 64)
+    Q = rotary_embedding(layer.Wq * x, -layer.θₐ)
+    K = rotary_embedding(layer.Wk * x, -layer.θₐ)
+    V = layer.Wv * x
+    rep_γs = repeatγ(layer)
+    Rᵢ = cross_retention(K, V, layer.γ, 0, layer.nheads)
+    O₀ = Vector{Matrix{eltype(V)}}()
+    os = foldl(1:chunk_size:size(V,2), init = (O₀, Rᵢ)) do (O₀, Rᵢ), n₀
+        oᵢ, Rᵢ = checkpointed(onechunk_forward, layer, Q, K, V, rep_γs, Rᵢ, chunk_size, n₀)
+        O₀ = vcat(O₀, [oᵢ])
+        (O₀, Rᵢ)
+    end
+    reduce(hcat, first(os))
+end
+
+function onechunk_forward(layer::RetentionLayer, Q, K, V, rep_γs, Rᵢ, chunk_size, n₀)
+    Bᵢ = n₀:min(n₀ + chunk_size - 1, size(V,2))
+    onechunk_forward(layer, Q, K, V, rep_γs, Rᵢ, chunk_size, Bᵢ)
+end
+
+function onechunk_forward(layer::RetentionLayer, Q, K, V, rep_γs, Rᵢ, chunk_size, Bᵢ::AbstractUnitRange)
+    n₀ = Bᵢ.start
+    Bᵢ₁ = max(1, (n₀ - chunk_size)):(n₀-1)
+    Qᵢ = Q[:, Bᵢ]
+    Kᵢ = K[:, Bᵢ]
+    Vᵢ = V[:, Bᵢ]
+    Rᵢ += cross_retention(K, V, layer.γ, Bᵢ₁, layer.nheads)
+    oᵢ = linear_attention(Qᵢ, Kᵢ, Vᵢ, layer.nheads, layer.γ) .+ rep_γs .^ (Bᵢ)'  .* (Rᵢ' * Qᵢ)
+    (oᵢ, Rᵢ)
+end
+
+repeatγ(layer::RetentionLayer{1}) = layer.γ
+repeatγ(layer::RetentionLayer{N,<:AbstractVector}) where {N} = repeat(layer.γ, inner = size(layer.Wv,1) ÷ N)
 
 # function cross_retention(K, V, γ::Real, n₀)
 #     sum(γ^(-m) * K[:,m] * V[:,m]' for m in 1:n₀-1)
