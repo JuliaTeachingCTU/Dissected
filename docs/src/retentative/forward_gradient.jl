@@ -270,7 +270,7 @@ function inner_recursion4(θ, K, V, Q, γ::Real, s₀::AbstractMatrix)
     s = similar(s₀, size(s₀,1), size(s₀,2), size(V,2) + 1)
     s[:,:,1] .= s₀
 
-    for i in axes(K ,2)
+    @inbounds for i in axes(K ,2)
         sᵢ = view(s, :, :, i+1)
         rot!(sᵢ, θ, view(s, :,:,i))
 
@@ -353,32 +353,42 @@ function ∂rot(ō, θ::AbstractVector, x::AbstractMatrix)
     ∂rot!(θ̄, x̄, ō, θ, x)
 end
 
+# Always check the gradients with respect to forward diff, otherwise you are doomed.
+using FiniteDifferences
+using Test
+
+@testset "Checking gradient of rot" begin 
+    θ = randn(8)
+    x = randn(16, 257)
+
+    ō = ones(size(rot(θ, x)))
+    @test ∂rot(ō, θ, x)[1] ≈ grad(central_fdm(5,1), θ -> sum(rot(θ, x)), θ)[1]
+    @test ∂rot(ō, θ, x)[2] ≈ grad(central_fdm(5,1), x -> sum(rot(θ, x)), x)[1]
+end
+
+
 # The rotation was easy. Now the formidable oponent is the gradient of `inner_recursion4.jl`,
 # as we need to be very careful of what we are overwriting and when.
 # Recall that the gradient needs to go the other way around.
 
 
-function ∂inner_recursion4(ō, θ, K, V, Q, γ::Real, s₀::AbstractMatrix)
-
+function ∂inner_recursion4(ō, θ, K, V, Q, γ::Real, s)
     T = eltype(K)
-    o = zeros(T, size(V, 1), size(K,2))
-    s = similar(s₀, size(s₀,1), size(s₀,2), size(V,2) + 1)
-    s[:,:,1] .= s₀
-    
     Q̄ = zeros(T, size(Q))
     K̄ = zeros(T, size(K))
     V̄ = zeros(T, size(V))
     θ̄ = zeros(T, length(θ)) 
+    γ̄ = zero(T)
 
-    s̄ = similar(s₀, size(s₀,1), size(s₀,2), size(V,2) + 1)
+    s̄ = similar(s)
     s̄[:,:,:] .= 0
 
-    @inbounds for i in axes(K ,2) 
+    for i in reverse(axes(K ,2))
         sᵢ = view(s, :, :, i+1)
         s̄ᵢ = view(s̄, :, :, i+1)
 
         # let's undo `sᵢ = sᵢ .* γ`, but update the gradient of γ
-        γ̄ += sum(s̄ᵢ)
+        γ̄ += sum(s̄ᵢ .* sᵢ)
         sᵢ .= sᵢ ./ γ
 
         # them, we update the gradient of θ
@@ -396,28 +406,67 @@ function ∂inner_recursion4(ō, θ, K, V, Q, γ::Real, s₀::AbstractMatrix)
             for k in axes(V, 1)
                 # forward part sᵢ[j,k] += K[j,i] * V[k,i]
                 K̄[j,i] += s̄ᵢ[j,k] * V[k,i]
-                V̄[k,i] += sᵢ[j,k] * K[j,i]
+                V̄[k,i] += s̄ᵢ[j,k] * K[j,i]
             end
         end
 
         # rot!(view(s, :, :, i+1), θ, view(s, :,:,i))
         ∂rot!(θ̄, view(s̄, :,:,i), s̄ᵢ, θ, view(s, :,:,i))
     end
-    o
+
+    return(θ̄, K̄, V̄, Q̄, γ̄, s̄[:,:,1])
 end
 
+# Since we need the `s` from the recursive_forward4 pass, we will modify a bit the calculation of 
+# the recursive_forward4 to have a version which will output the state `s`.
 
+function _inner_recursion4(θ, K, V, Q, γ::Real, s₀::AbstractMatrix)
+        T = eltype(K)
+    o = zeros(T, size(V, 1), size(K,2))
+    s = similar(s₀, size(s₀,1), size(s₀,2), size(V,2) + 1)
+    s[:,:,1] .= s₀
 
-# Always check the gradients with respect to forward diff, otherwise you are doomed.
-using FiniteDifferences
-using Test
+    @inbounds for i in axes(K ,2)
+        sᵢ = view(s, :, :, i+1)
+        rot!(sᵢ, θ, view(s, :,:,i))
 
-@testset "Checking gradient of rot" begin 
+        # s += K[:,i] .* V[:,i]'
+        for j in axes(K, 1)
+            for k in axes(V, 1)
+                sᵢ[j,k] += K[j,i] * V[k,i]
+            end
+        end
+
+        # o[:,i] .= s' * Q[:,i]
+        for j in axes(Q, 1)
+            v = zero(T)
+            for k in axes(V, 1)
+                v += Q[k,i] * sᵢ[k,j]
+            end
+            o[j,i] = v
+        end
+
+        # s = sᵢ .* γ
+        sᵢ .= sᵢ .* γ 
+    end
+    o, s
+end
+
+@testset "Checking gradient of ∂inner_recursion4" begin 
+    s₀ = zeros(16,16)
     θ = randn(8)
-    x = randn(16, 257)
+    K = randn(16, 13)
+    V = randn(16, 13)
+    Q = randn(16, 13)
+    γ = 1.0
 
-    ō = ones(size(rot(θ, x)))
-    @test ∂rot(ō, θ, x)[1] ≈ grad(central_fdm(5,1), θ -> sum(rot(θ, x)), θ)[1]
-    @test ∂rot(ō, θ, x)[2] ≈ grad(central_fdm(5,1), x -> sum(rot(θ, x)), x)[1]
+    o, s = _inner_recursion4(θ, K, V, Q, γ, s₀)
+    ō = ones(size(o))
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[1] ≈ grad(central_fdm(5,1), θ -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), θ)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[2] ≈ grad(central_fdm(5,1), K -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), K)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[3] ≈ grad(central_fdm(5,1), V -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), V)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[4] ≈ grad(central_fdm(5,1), Q -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), Q)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[5] ≈ grad(central_fdm(5,1), γ -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), γ)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[6] ≈ grad(central_fdm(5,1), s₀ -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), s₀)[1]
 end
 
