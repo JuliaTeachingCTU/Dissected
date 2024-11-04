@@ -149,14 +149,14 @@ function benchmark(hidden_dim, nheads; max_length = 2^18)
     head_dim = 8
     hidden_dim = nheads * head_dim
     layer = RetentionLayer(hidden_dim, hidden_dim, hidden_dim; nheads)
-    max_l = ceil(Int, log2(max_length))
-    map(2:16) do n 
+    map(2:20) do n 
         l = 2^n
         x = randn(Float32, hidden_dim, l)
         stats = (;
         length = l,    
-        chunk_64 = (@elapsed gradient(layer -> sum(chunk_forward(layer, x;chunk_size = 64)), layer)),
-        chunk_256 = (@elapsed gradient(layer -> sum(chunk_forward(layer, x;chunk_size = 256)), layer)),
+        chunk_64 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 64)), layer)),
+        chunk_256 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 256)), layer)),
+        chunk_1024 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 1024)), layer)),
         )
         @show stats
         stats

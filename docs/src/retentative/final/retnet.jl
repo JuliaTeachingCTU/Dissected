@@ -125,7 +125,7 @@ function chunk_forward2(layer::RetentionLayer, x; chunk_size = 64)
     Rᵢ = cross_retention(K, V, layer.γ, 0, layer.nheads)
     O₀ = Vector{Matrix{eltype(V)}}()
     os = foldl(1:chunk_size:size(V,2), init = (O₀, Rᵢ)) do (O₀, Rᵢ), n₀
-        oᵢ, Rᵢ = checkpointed(onechunk_forward, layer, Q, K, V, rep_γs, Rᵢ, chunk_size, n₀)
+        oᵢ, Rᵢ = Zygote.checkpointed(onechunk_forward, layer, Q, K, V, rep_γs, Rᵢ, chunk_size, n₀)
         O₀ = vcat(O₀, [oᵢ])
         (O₀, Rᵢ)
     end
@@ -140,9 +140,9 @@ end
 function onechunk_forward(layer::RetentionLayer, Q, K, V, rep_γs, Rᵢ, chunk_size, Bᵢ::AbstractUnitRange)
     n₀ = Bᵢ.start
     Bᵢ₁ = max(1, (n₀ - chunk_size)):(n₀-1)
-    Qᵢ = Q[:, Bᵢ]
-    Kᵢ = K[:, Bᵢ]
-    Vᵢ = V[:, Bᵢ]
+    Qᵢ = @view Q[:, Bᵢ]
+    Kᵢ = @view K[:, Bᵢ]
+    Vᵢ = @view V[:, Bᵢ]
     Rᵢ += cross_retention(K, V, layer.γ, Bᵢ₁, layer.nheads)
     oᵢ = linear_attention(Qᵢ, Kᵢ, Vᵢ, layer.nheads, layer.γ) .+ rep_γs .^ (Bᵢ)'  .* (Rᵢ' * Qᵢ)
     (oᵢ, Rᵢ)
