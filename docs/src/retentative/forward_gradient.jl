@@ -383,7 +383,7 @@ function ∂inner_recursion4(ō, θ, K, V, Q, γ::Real, s)
     s̄ = similar(s)
     s̄[:,:,:] .= 0
 
-    for i in reverse(axes(K ,2))
+    @inbounds for i in reverse(axes(K ,2))
         sᵢ = view(s, :, :, i+1)
         s̄ᵢ = view(s̄, :, :, i+1)
 
@@ -470,3 +470,36 @@ end
     @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[6] ≈ grad(central_fdm(5,1), s₀ -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), s₀)[1]
 end
 
+# This start to looks great. To finish the stuff, we create a chainrule for  `inner_recursion4`
+# to make this compatible with Zygote.
+
+function ChainRulesCore.rrule(::typeof(inner_recursion4), θ, K, V, Q, γ, s₀)
+    y, s = _inner_recursion4(θ, K, V, Q, γ, s₀)
+    function inner_recursion_pullback(ȳ)
+        return(NoTangent(), ∂inner_recursion4(ȳ, θ, K, V, Q, γ, s)...)
+    end
+    return y, inner_recursion_pullback
+end
+
+# Finally, we verify that it works with Zygote as intended.
+nheads = 4
+head_dim = 8
+hidden_dim = nheads * head_dim
+layer = RetentionLayer(hidden_dim, hidden_dim, hidden_dim; nheads)
+x = randn(Float32, hidden_dim, 257)
+gradient(layer -> sum(recursive_forward4(layer, x)), layer) !== nothing
+
+# and how about stress-tests?
+using DataFrames
+using BenchmarkTools
+map(2:20) do n 
+    l = 2^n
+    x = randn(Float32, hidden_dim, l)
+    stats = (;
+        length = l, 
+        forward  = (@elapsed recursive_forward4(layer, x)),
+        gradient = (@elapsed gradient(layer -> sum(recursive_forward4(layer, x)), layer)),
+    )
+    @show stats
+    stats
+end |> DataFrame
