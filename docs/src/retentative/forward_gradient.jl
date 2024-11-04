@@ -340,8 +340,8 @@ function ∂rot!(θ̄, x̄, ō, θ::AbstractVector, x::AbstractMatrix)
             θ̄[k] += ō[i,col]*(- sinθ * x[i,col] - cosθ * x[i+1,col])
             θ̄[k] += ō[i+1,col]*( cosθ * x[i,col] - sinθ * x[i+1,col])
 
-            x̄[i,col]   += ō[i,col] * cosθ + ō[i+1,col] * sinθ
-            x̄[i+1,col] += - sinθ * ō[i,col] + ō[i+1,col] * cosθ
+            x̄[i,col]   = ō[i,col] * cosθ + ō[i+1,col] * sinθ
+            x̄[i+1,col] = - sinθ * ō[i,col] + ō[i+1,col] * cosθ
         end
     end
     return(θ̄, x̄)
@@ -380,12 +380,11 @@ function ∂inner_recursion4(ō, θ, K, V, Q, γ::Real, s)
     θ̄ = zeros(T, length(θ)) 
     γ̄ = zero(T)
 
-    s̄ = similar(s)
-    s̄[:,:,:] .= 0
+    s̄ᵢ = zeros(T, size(s,1), size(s,2))
+    s̄ᵢ₋₁ = zeros(T, size(s,1), size(s,2))
 
     @inbounds for i in reverse(axes(K ,2))
         sᵢ = view(s, :, :, i+1)
-        s̄ᵢ = view(s̄, :, :, i+1)
 
         # let's undo `sᵢ = sᵢ .* γ`, but update the gradient of γ
         γ̄ += sum(s̄ᵢ .* sᵢ)
@@ -411,10 +410,12 @@ function ∂inner_recursion4(ō, θ, K, V, Q, γ::Real, s)
         end
 
         # rot!(view(s, :, :, i+1), θ, view(s, :,:,i))
-        ∂rot!(θ̄, view(s̄, :,:,i), s̄ᵢ, θ, view(s, :,:,i))
+        ∂rot!(θ̄, s̄ᵢ₋₁, s̄ᵢ, θ, view(s, :,:,i))
+        s̄ᵢ, s̄ᵢ₋₁ = s̄ᵢ₋₁, s̄ᵢ
+
     end
 
-    return(θ̄, K̄, V̄, Q̄, γ̄, s̄[:,:,1])
+    return(θ̄, K̄, V̄, Q̄, γ̄, s̄ᵢ)
 end
 
 # Since we need the `s` from the recursive_forward4 pass, we will modify a bit the calculation of 
