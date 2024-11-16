@@ -210,10 +210,10 @@ function inner_recursion3(θ, K, V, Q, γ::Real, s)
         end
 
         # o[:,i] .= s' * Q[:,i]
-        for j in axes(Q, 1)
+        for j in axes(V, 1)
             v = zero(T)
-            for k in axes(V, 1)
-                v += Q[k,i] * sᵢ[k,j]
+            for k in axes(Q, 1)
+                v += Q[k,i] * sᵢ[k, j]
             end
             o[j,i] = v
         end
@@ -282,10 +282,10 @@ function inner_recursion4(θ, K, V, Q, γ::Real, s₀::AbstractMatrix)
         end
 
         # o[:,i] .= s' * Q[:,i]
-        for j in axes(Q, 1)
+        for j in axes(V, 1)
             v = zero(T)
-            for k in axes(V, 1)
-                v += Q[k,i] * sᵢ[k,j]
+            for k in axes(Q, 1)
+                v += Q[k,i] * sᵢ[k, j]
             end
             o[j,i] = v
         end
@@ -391,9 +391,8 @@ function ∂inner_recursion4(ō, θ, K, V, Q, γ::Real, s)
         sᵢ .= sᵢ ./ γ
 
         # them, we update the gradient of θ
-        for j in axes(Q, 1)
-            v = zero(T)
-            for k in axes(V, 1)
+        for j in axes(V, 1)
+            for k in axes(Q, 1)
                 # forward part: o[j,i] += Q[k,i] * sᵢ[k,j]
                 Q̄[k,i]  += ō[j,i] * sᵢ[k,j]
                 s̄ᵢ[k,j] += Q[k,i] * ō[j,i]
@@ -439,10 +438,10 @@ function _inner_recursion4(θ, K, V, Q, γ::Real, s₀::AbstractMatrix)
         end
 
         # o[:,i] .= s' * Q[:,i]
-        for j in axes(Q, 1)
+        for j in axes(V, 1)
             v = zero(T)
-            for k in axes(V, 1)
-                v += Q[k,i] * sᵢ[k,j]
+            for k in axes(Q, 1)
+                v += Q[k,i] * sᵢ[k, j]
             end
             o[j,i] = v
         end

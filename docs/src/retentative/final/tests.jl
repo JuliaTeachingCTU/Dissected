@@ -1,4 +1,8 @@
+using SmellyAV
+using FiniteDifferences
+using Zygote
 using Test
+using SmellyAV: linear_attention
 
 @testset "Gradient of linear attention" begin
    Q = randn(8,127);
@@ -34,6 +38,33 @@ end
         @test _∂cross_retention(ȳ, K, V, γs, 1:(n₀-1), Val(nheads))[2] ≈ grad(central_fdm(5,1), V -> sum(cross_retention(K, V, γs, n₀, Val(nheads))), V)[1]
         @test _∂cross_retention(ȳ, K, V, γs, 1:(n₀-1), Val(nheads))[3] ≈ grad(central_fdm(5,1), γs -> sum(cross_retention(K, V, γs, n₀, Val(nheads))), γs)[1]
     end
+end
+
+@testset "Checking gradient of rot" begin 
+    θ = randn(8)
+    x = randn(16, 257)
+
+    ō = ones(size(rot(θ, x)))
+    @test ∂rot(ō, θ, x)[1] ≈ grad(central_fdm(5,1), θ -> sum(rot(θ, x)), θ)[1]
+    @test ∂rot(ō, θ, x)[2] ≈ grad(central_fdm(5,1), x -> sum(rot(θ, x)), x)[1]
+end
+
+@testset "Checking gradient of ∂inner_recursion4" begin 
+    s₀ = zeros(16,16)
+    θ = randn(8)
+    K = randn(16, 13)
+    V = randn(16, 13)
+    Q = randn(16, 13)
+    γ = 1.0
+
+    o, s = _inner_recursion4(θ, K, V, Q, γ, s₀)
+    ō = ones(size(o))
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[1] ≈ grad(central_fdm(5,1), θ -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), θ)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[2] ≈ grad(central_fdm(5,1), K -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), K)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[3] ≈ grad(central_fdm(5,1), V -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), V)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[4] ≈ grad(central_fdm(5,1), Q -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), Q)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[5] ≈ grad(central_fdm(5,1), γ -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), γ)[1]
+    @test ∂inner_recursion4(ō, θ, K, V, Q, γ, s)[6] ≈ grad(central_fdm(5,1), s₀ -> sum(inner_recursion4(θ, K, V, Q, γ, s₀)), s₀)[1]
 end
 
 @testset "RetNet" begin
@@ -72,10 +103,10 @@ end
             x = randn(Float32, hidden_dim, 257)
             @test gradient(layer -> sum(batch_forward(layer, x)), layer) !== nothing
             @test gradient(layer -> sum(chunk_forward(layer, x;chunk_size = 16)), layer) !== nothing
+            gradient(layer -> sum(recursive_forward(layer, x)), layer) !== nothing
         end
     end
 end
-
 
 
 function benchmark(hidden_dim, nheads; max_length = 2^18)
@@ -154,9 +185,10 @@ function benchmark(hidden_dim, nheads; max_length = 2^18)
         x = randn(Float32, hidden_dim, l)
         stats = (;
         length = l,    
-        chunk_64 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 64)), layer)),
-        chunk_256 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 256)), layer)),
-        chunk_1024 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 1024)), layer)),
+        # chunk_64 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 64)), layer)),
+        # chunk_256 = (@elapsed gradient(layer -> sum(chunk_forward(layer, x;chunk_size = 256)), layer)),
+        check_1024 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 1024)), layer)),
+        # chunk_1024 = (@elapsed gradient(layer -> sum(chunk_forward2(layer, x;chunk_size = 1024)), layer)),
         )
         @show stats
         stats
