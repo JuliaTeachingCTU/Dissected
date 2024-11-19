@@ -7,8 +7,10 @@ version = "0.1.0"
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 Literate = "98b081ad-f1c9-55d3-8b20-4c87d4299306"
+ProfileCanvas = "efd6af41-a80b-495e-886c-e51b0c7d77a3"
 
 [compat]
 ChainRules = "1.72.1"
 Documenter = "1.7.0"
 Literate = "2.20.0"
+ProfileCanvas = "0.1.6"
