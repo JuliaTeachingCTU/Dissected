@@ -56,8 +56,80 @@ end
 # The first step is to get IRCode of the function. We can do this by calling `code_ircode` from Base.
 # Note that when calling `Base.code_ircode` we need to provide the types of the arguments, not their values.
 # This is because the compiler does not care about values, but about types.
-
+# We can ask for different level of optimization, but such a simple function, it will not make much difference:
+# ```julia
+#    @pass "convert"   ir = convert_to_ircode(ci, sv)
+#    @pass "slot2reg"  ir = slot2reg(ir, ci, sv)
+#    @pass "compact 1" ir = compact!(ir)
+#    @pass "Inlining"  ir = ssa_inlining_pass!(ir, sv.inlining, ci.propagate_inbounds)
+#    @pass "compact 2" ir = compact!(ir)
+#    @pass "SROA"      ir = sroa_pass!(ir, sv.inlining)
+#    @pass "ADCE"      ir = adce_pass!(ir, sv.inlining)
+#    @pass "compact 3" ir = compact!(ir)
+# ```
 ir, _ = only(Base.code_ircode(foo, (Float64, Float64); optimize_until = "compact 1"))
+
+# 
+# !!! note "The IRCode structure"
+#   ```julia
+#   struct IRCode
+#       stmts::InstructionStream
+#       argtypes::Vector{Any}
+#       sptypes::Vector{VarState}
+#       linetable::Vector{LineInfoNode}
+#       cfg::CFG
+#       new_nodes::NewNodeStream
+#       meta::Vector{Expr}
+#   end
+#   ```
+#   where
+#   * `stmts` is a stream of instruction (more in this below)
+#   * `argtypes` holds types of arguments of the function whose `IRCode` we have obtained
+#   * `sptypes` is a vector of `VarState`. It seems to be related to parameters of types
+#   * `linetable` is a table of unique lines in the source code from which statements 
+#   * `cfg` holds control flow graph, which contains building blocks and jumps between them
+#   * `new_nodes` is an infrastructure that can be used to insert new instructions to the existing `IRCode` . The idea behind is that since insertion requires a renumbering all statements, they are put in a separate queue. They are put to correct position with a correct `SSANumber`  by calling `compact!`.
+#   * `meta` is something.
+# 
+#   Before going further, let's take a look on `InstructionStream` defined as 
+#   ```julia
+#   struct InstructionStream
+#       inst::Vector{Any}
+#       type::Vector{Any}
+#       info::Vector{CallInfo}
+#       line::Vector{Int32}
+#       flag::Vector{UInt8}
+#   end
+#   ```
+#   where 
+#   * `inst` is a vector of instructions, stored as `Expr`essions. The allowed fields in `head` are described [here](https://docs.julialang.org/en/v1/devdocs/ast/#Expr-types)
+#   * `type` is the type of the value returned by the corresponding statement
+#   * `CallInfo` is ???some info???
+#   * `line` is an index into `IRCode.linetable` identifying from which line in source code the statement comes from
+#   * `flag`  are some flags providing additional information about the statement.
+#     - `0x01 << 0` = statement is marked as `@inbounds`
+#     - `0x01 << 1` = statement is marked as `@inline`
+#     - `0x01 << 2` = statement is marked as `@noinline`
+#     - `0x01 << 3` = statement is within a block that leads to `throw` call
+#     - `0x01` << 4 = statement may be removed if its result is unused, in particular it is thus be both pure and effect free
+#     - `0x01 << 5-6 = <unused>`
+#     - `0x01 << 7 = <reserved>` has out-of-band info
+# 
+#   For the above `foo` function, the InstructionStream looks like
+#   
+#   ```julia
+#   julia> DataFrame(flag = ir.stmts.flag, info = ir.stmts.info, inst = ir.stmts.inst, line = ir.stmts.line, type = ir.stmts.type)
+#   4×5 DataFrame
+#    Row │ flag   info                               inst          line   type
+#        │ UInt8  CallInfo                           Any           Int32  Any
+#   ─────┼────────────────────────────────────────────────────────────────────────
+#      1 │   112  MethodMatchInfo(MethodLookupResu…  _2 * _3           1  Float64
+#      2 │    80  MethodMatchInfo(MethodLookupResu…  Main.sin(_2)      2  Float64
+#      3 │   112  MethodMatchInfo(MethodLookupResu…  %1 + %2           2  Float64
+#      4 │     0  NoCallInfo()                       return %3         2  Any
+#   ```
+# We can index into the statements as `ir.stmts[1]`, which provides a "view" into the vector. To obtain the first instruction, we can do `ir.stmts[1][:inst]`.
+
 
 # The returned IRCode will looks like this.
 # ```julia
@@ -86,49 +158,81 @@ new_insts = Any[]       # storate for instructions
 new_line = Int32[]      # Index of instruction we are differentiating
 ssamap = Dict{SSAValue,SSAValue}() # this maps old SSA values to new SSA values, since they need to be linearly ordered.
 
-  for (i, stmt) in enumerate(ir.stmts)
+# We also define a remap function which will be used to map old SSA values to new SSA values. 
+remap(d, args::Tuple) = map(a -> remap(d,a), args) 
+remap(d, args::Vector) = map(a -> remap(d,a), args) 
+remap(d, r::ReturnNode) = ReturnNode(remap(d, r.val))
+remap(d, x::SSAValue) = d[x] 
+remap(d, x) = x
+
+
+struct Pullback{T<:Tuple}
+  data::T
+end
+
+Pullback(args...) = Pullback(tuple(args...))
+Base.getindex(p::Pullback, i) = p.data[i]
+
+
+# The main loop transforming the function looks like foollows
+for (i, stmt) in enumerate(ir.stmts)
    inst = stmt[:inst]
    if inst isa Expr && inst.head == :call
-      new_inst = Expr(:call, GlobalRef(ChainRules, :rrule), remap(ssamap, inst.args)...)
-      push!(new_insts, new_inst)
-      push!(new_line, stmt[:line])
-      rrule_ssa = SSAValue(length(new_insts))
+        new_inst = Expr(:call, GlobalRef(ChainRules, :rrule), remap(ssamap, inst.args)...)
+        push!(new_insts, new_inst)
+        push!(new_line, stmt[:line])
+        rrule_ssa = SSAValue(length(new_insts)) 
 
+        push!(new_insts, Expr(:call, GlobalRef(Base, :getindex), rrule_ssa, 1))
+        push!(new_line, stmt[:line])
+        val_ssa = SSAValue(length(new_insts))
+        ssamap[SSAValue(i)] = val_ssa   
 
-      push!(new_insts, Expr(:call, GlobalRef(Base, :getindex), rrule_ssa, 1))
-      push!(new_line, stmt[:line])
-      val_ssa = SSAValue(length(new_insts))
-      ssamap[SSAValue(i)] = val_ssa
-
-      push!(new_insts, Expr(:call, GlobalRef(Base, :getindex), rrule_ssa, 2))
-      pullback_ssa = SSAValue(length(new_insts))
-      push!(new_line, stmt[:line])
-      push!(pullbacks, (;old_ssa = i, inst = inst, pullback_ssa))
-      continue
+        push!(new_insts, Expr(:call, GlobalRef(Base, :getindex), rrule_ssa, 2))
+        pullback_ssa = SSAValue(length(new_insts))
+        push!(new_line, stmt[:line])
+        push!(pullbacks, (;old_ssa = i, inst = inst, pullback_ssa))
+        continue
    end
 
-   if inst isa ReturnNode
-      push!(new_insts, Expr(:call, GlobalRef(Main, :Pullback), map(x -> x[end], pullbacks)...))
-      pullback_ssa = SSAValue(length(new_insts))
-      push!(new_line, stmt[:line])
+    if inst isa ReturnNode
+        push!(new_insts, Expr(:call, GlobalRef(Main, :Pullback), map(x -> x[end], pullbacks)...))
+        pullback_ssa = SSAValue(length(new_insts))
+        push!(new_line, stmt[:line])
 
-      # construct returned tuple
-      push!(new_insts, Expr(:call, GlobalRef(Base, :tuple), remap(ssamap, inst.val), pullback_ssa))
-      returned_tuple = SSAValue(length(new_insts))
-      push!(new_line, stmt[:line])
+        # construct returned tuple
+        push!(new_insts, Expr(:call, GlobalRef(Base, :tuple), remap(ssamap, inst.val), pullback_ssa))
+        returned_tuple = SSAValue(length(new_insts))
+        push!(new_line, stmt[:line])
 
-      push!(new_insts, ReturnNode(returned_tuple))
-      push!(new_line, stmt[:line])
-      continue
-     end
+        push!(new_insts, ReturnNode(returned_tuple))
+        push!(new_line, stmt[:line])
+        continue
+    end
    error("unknown node $(i)")
-  end
+end
 
-  # this nightmare construct the IRCode with absolutely useless type information
-  argtypes = Any[Tuple{}, ir.argtypes[2:end]...]
-  new_ir = ircode(new_insts, argtypes)
-  # new_ir = infer_ir!(new_ir)
-  (new_ir, pullbacks)
+# After the loop, we obtain stream of new instructions in the `new_insts` and information about how to construct 
+# the reverse pass stored in `pullbacks`.
+# Now, we need to consruct valid IRCode, which can be executed. We do this by first 
+# constructing Instruction stream as
+stmts = CC.InstructionStream(
+    new_insts,
+    fill(Any, length(new_insts)),
+    fill(CC.NoCallInfo(), length(new_insts)),
+    new_line,
+    fill(CC.IR_FLAG_REFINED, length(new_insts)),
+)
+# where (i) we have marked all instruction to undergo effect analysis (`CC.IR_FLAG_REFINED`),
+# and we set all return type to `Any` to make them amenable for typing. 
+# From this stream, we can construct new IRCode as
+
+cfg = CC.compute_basic_blocks(new_insts)
+linetable = [CC.LineInfoNode(Main, :ircode, :ir_utils, Int32(1), Int32(0))]
+forward_ir =  CC.IRCode(stmts, cfg, linetable, Any[Tuple{}, Float64, Float64], Expr[], CC.VarState[]);
+
+# which can be executed by wrapping it into `OpaqueClosure`
+oc = Core.OpaqueClosure(forward_ir)
 
 
 function ircode(
@@ -184,21 +288,6 @@ function __infer_ir!(ir, interp::CC.AbstractInterpreter, mi::CC.MethodInstance)
     rt = CC._ir_abstract_constant_propagation(interp, irsv)
     return ir
 end
-
-
-struct Pullback{T<:Tuple}
-  data::T
-end
-
-Pullback(args...) = Pullback(tuple(args...))
-Base.getindex(p::Pullback, i) = p.data[i]
-
-remap(d, args::Tuple) = map(a -> remap(d,a), args) 
-remap(d, args::Vector) = map(a -> remap(d,a), args) 
-remap(d, r::ReturnNode) = ReturnNode(remap(d, r.val))
-remap(d, x::SSAValue) = d[x] 
-remap(d, x) = x
-
 
 function forward(ir, T = Any)
   pullbacks = []
