@@ -72,7 +72,7 @@ lines(1:20, [std(reinforce(f, 0.3, 2^n) for _ in 1:1000) for n in 1:20])
 # For our case of Bernoulli, we first define define random variable `p(z|θ)`, for which it holds that 
 # `heaviside(p(z|θ))` is Bernoulli distributed with probability `θ`. We can define it as 
 logit(x::T) where {T<:Real} = log(x / (one(T)-x)) 
-pz_θ(θ::T) where {T<:Real} = logit(θ) - logit(rand(T))
+pz_θ(θ::T) where {T<:Real} = logit(θ) - (Zygote.@ignore logit(rand(T)))
 heaviside(z) = z >= 0
 
 # The correctness can be be verified by showing that `mean((heaviside ∘ pz_θ)(0.3f0) for _ in 1:100000) = 0.29952`.
@@ -81,20 +81,38 @@ heaviside(z) = z >= 0
 # the approximation is closer to Bernoulli.
 bernoulli_softmax(z, log_temperature) = Flux.σ(z / exp(log_temperature))
 
-
-fig, ax,_ = hist([(heaviside ∘ pz_θ)(0.3f0) for _ in 1:10000], bins = 100, label = "Bernoulli", normalization = :pdf)
+# Below plot shows the histogram of the smooth approximation for different temperature. 
+fig, ax,_ = hist([(heaviside ∘ pz_θ)(0.3f0) for _ in 1:10000], bins = 100, label = "Bernoulli", normalization = :pdf);
 for τ in -3:0
 	hist!(ax, [(bernoulli_softmax(pz_θ(0.3f0), τ)) for _ in 1:10000], bins = 100, label = "Soft bernouli with $(τ)", normalization = :pdf)
 end
+fig
+
+# As said above, the smooth approximation is differentiable with respect to `θ` and we can therefore
+# directly estimate the gradient of the expectation using stochastice monte-carlo.
+function reparam(f, θ, n, τ) 
+    mean(1:n) do i 
+        only(Zygote.gradient(θ -> f(bernoulli_softmax(pz_θ(θ), τ)), θ))
+    end
+end
+
+# This estimator has lower variance than the reinforce but it is biassed. With decreasing temperature, the bias decreses,
+# but the variance increases, which is shown below.
+fig = Figure(size = (800, 1000))
+ga = fig[1, 1] = GridLayout()
+axleft = Axis(ga[1, 1])
+axright = Axis(ga[1, 2])
+
+nmax = 15
+lines!(axleft, 1:nmax, [std(reinforce(f, 0.3, 2^n) for _ in 1:1000) for n in 1:nmax], label = "Bernoulli - reinforce");
+lines!(axright, 1:nmax, [mean(reinforce(f, 0.3, 2^n) for _ in 1:1000) for n in 1:nmax], label = "Bernoulli - reinforce");
+for τ in -3:0
+    lines!(axleft, 1:nmax, [std(reparam(f, 0.3, 2^n, τ) for _ in 1:1000) for n in 1:nmax], label = "Soft bernouli with $(τ)")
+    lines!(axright, 1:nmax, [mean(reparam(f, 0.3, 2^n, τ) for _ in 1:1000) for n in 1:nmax], label = "Soft bernouli with $(τ)")
+end
+fig
 
 
-
-
-# expit(x) = 1 / (1 + exp(-x))
-
-
-
-bernoulli_softmax(z, log_temperature) = expit(z / exp(log_temperature))
 
 logistic_sample(noise, mu = 0, sigma=1) = mu + logit(noise) * sigma
 
