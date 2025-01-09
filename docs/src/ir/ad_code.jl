@@ -63,7 +63,7 @@ function __infer_ir!(ir, interp::CC.AbstractInterpreter, mi::CC.MethodInstance)
     return ir
 end
 
-function forward(ir, T = Any)
+function construct_forward(ir, T = Any)
   pullbacks = []
   new_insts = Any[]
   new_line = Int32[]
@@ -180,7 +180,6 @@ function prepare_gradient(f, args...)
     forward_ir, pullbacks = forward(ir)
     rt = Base.Experimental.compute_ir_rettype(forward_ir)
     reverse_ir = construct_pullback(pullbacks, rt)
-    infer_ir!(reverse_ir)
    
     foc = Core.OpaqueClosure(forward_ir; do_compile = true)
     roc = Core.OpaqueClosure(reverse_ir; do_compile = true)
