@@ -5,7 +5,11 @@
 # the estimator is unbiassed, but it uses relaxed samples provided by reparametrization trick
 # as a control variate reducing the variance. Moreover, unlike other methods parameters of the relaxation, importantly the temperature are optimized.
 
-using Flux, Distributions, Statistics, GLMakie
+using Flux
+using Flux.Zygote
+using Distributions
+using Statistics
+using GLMakie
 
 # Let's start with an easy problem. Let's assume we have a function `f` of a bernoulli variable. 
 # In the paper, they use
@@ -24,7 +28,7 @@ function monte_carlo(f, θ, n)
 end
 # where `n` is the number of samples. The estimator is unbiassed, but it has certain variance, which
 # can be seen as follows.
-lines(ns, [std(monte_carlo(f, 0.3, 2^n) for _ in 1:1000) for n in 1:20])
+lines(20, [std(monte_carlo(f, 0.3, 2^n) for _ in 1:1000) for n in 1:20])
 
 # But we are interested in gradients. The classic method to compute stochastic estimate of 
 # the gradient of parameters of the discrete distribution is REINFORCE. The method is based on the
@@ -72,6 +76,7 @@ lines(1:20, [std(reinforce(f, 0.3, 2^n) for _ in 1:1000) for n in 1:20])
 # For our case of Bernoulli, we first define define random variable `p(z|θ)`, for which it holds that 
 # `heaviside(p(z|θ))` is Bernoulli distributed with probability `θ`. We can define it as 
 logit(x::T) where {T<:Real} = log(x / (one(T)-x)) 
+pz_θ(θ::Real, u::Real) = logit(θ) - logit(u)
 pz_θ(θ::T) where {T<:Real} = logit(θ) - (Zygote.@ignore logit(rand(T)))
 heaviside(z) = z >= 0
 
@@ -96,25 +101,116 @@ function reparam(f, θ, n, τ)
     end
 end
 
-# This estimator has lower variance than the reinforce but it is biassed. With decreasing temperature, the bias decreses,
-# but the variance increases, which is shown below.
+# This estimator has lower variance than the reinforce but it is biassed. Below figure shows on the left 
+# mean of estimates and on the right their variance.
 fig = Figure(size = (800, 1000))
 ga = fig[1, 1] = GridLayout()
 axleft = Axis(ga[1, 1])
 axright = Axis(ga[1, 2])
 
 nmax = 15
-lines!(axleft, 1:nmax, [std(reinforce(f, 0.3, 2^n) for _ in 1:1000) for n in 1:nmax], label = "Bernoulli - reinforce");
-lines!(axright, 1:nmax, [mean(reinforce(f, 0.3, 2^n) for _ in 1:1000) for n in 1:nmax], label = "Bernoulli - reinforce");
+meanstd(vals) = (mean(vals), std(vals))
+stats = [meanstd([reinforce(f, 0.3, 2^n) for _ in 1:1000]) for n in 1:nmax]
+lines!(axleft, 1:nmax, first.(stats), label = "Bernoulli - reinforce");
+lines!(axright, 1:nmax, last.(stats), label = "Bernoulli - reinforce");
 for τ in -3:0
-    lines!(axleft, 1:nmax, [std(reparam(f, 0.3, 2^n, τ) for _ in 1:1000) for n in 1:nmax], label = "Soft bernouli with $(τ)")
-    lines!(axright, 1:nmax, [mean(reparam(f, 0.3, 2^n, τ) for _ in 1:1000) for n in 1:nmax], label = "Soft bernouli with $(τ)")
+    stats = [meanstd([reparam(f, 0.3, 2^n, τ) for _ in 1:1000]) for n in 1:nmax]
+    lines!(axleft, 1:nmax, first.(stats) , label = "Soft bernouli with $(τ)")
+    lines!(axright, 1:nmax, last.(stats), label = "Soft bernouli with $(τ)")
 end
+axislegend(axright)
+fig
+# What can see that the estimate of the reparametrized Bernoulli is biassed and the biass decreases with 
+# the temperature. Contrary, the variance of the estimate increases with the temperature. Finally we 
+# see that the variance is higher than that of Reinforce method, but that can be caused by the fact that we 
+# have only one Bernoulli variable.
+
+# So far, we have two approaches. One, which is biassed and has low variance and the other, 
+# which is unbiassed but it has high variance.
+# The ideal introduced by Rebar (Rebar: Low-variance, unbiased gradient estimates for discrete latent variable models),
+# is to combine the two methods. The idea is to use the reparametrization trick to create a control variate
+# for the reinforce method and optimize its parameters to have low variance.
+# 
+# The idea is followig. We have a function `f` and a Bernoulli random variable with parameter `θ`.
+# Reinforce computes the gradient of the expectation of `f` with respect to `θ` as 
+# ``\mathbb{E}_{b \sim p(b|\theta)}\left[f(b)\logp(b|\theta) \right]``
+# and the reparametrization trick as 
+# ``\mathbb{E}_{u \sim U[0,1]}f(\phi(\theta,u))\right]``
+# where ``\phi(\theta,u)` is the above reparametrization trick implemented by composition `bernoulli_softmax ∘ pz_θ`.
+# 
+# This estimator is called LAX and is defined as
+# 
+# ``\mathbb{E}_{b \sim p(b|\theta)}\left[f(b)\logp(b|\theta) - \mathbb{E}_{v \sim p(v|b,\theta)}\left[f(\phi(\theta,v)) \right]  \right] + \mathbb{E}_{u \sim U[0,1]}f(\phi(\theta,u))\right]``
+# 
+# where we need to ensure that the distribution of ``v \sim p(v|b,\theta)p(b|\theta)`` is uniform on `[0,1].`
+
+
+# Below function generates `v` from a noise \sim U[0,1] and b
+function conditional_noise(θ, b, noise)
+    (1-b) * (noise * (1 - θ) + θ) + b * noise * θ
+end
+
+conditional_noise(θ, b) = conditional_noise(θ, b, rand())
+
+
+# We can see that the distribution of both noises are matching.
+hist([conditional_noise(0.3, rand(Bernoulli(0.3)), rand()) for _ in 1:10000], bins = 100, normalization = :pdf)
+
+
+# TODO: We need to compute reinforce with respect to p(z|θ) and not with respect to p(b|θ), I guess.
+
+
+# it has to hold that 
+θ = 0.3
+τ = 0
+z̃ = map(1:10000) do _ 
+    b = rand(Bernoulli(θ))
+    v = conditional_noise(θ, b, rand())
+    z̃ = bernoulli_softmax(pz_θ(θ,v), τ)
+end
+z = map(1:10000) do _
+    bernoulli_softmax(pz_θ(θ,rand()), τ)
+end
+
+plt, ax, _ =hist(z̃, bins = 100, normalization = :pdf)
+hist!(ax, z, bins = 100, normalization = :pdf)
+
+function reinforce_control(f, θ, n, τ) 
+    mean(1:n) do i 
+        b = rand(Bernoulli(θ))
+        v = conditional_noise(θ, 1-b, rand())
+        z̃ = bernoulli_softmax(pz_θ(θ,v), τ)
+        (f(b) - f(z̃)) * only(Zygote.gradient(θ -> logpdf_bernoulli(θ, b), θ))
+    end
+end
+
+function lax(f, θ, τ, n)
+    reinforce_control(f, θ, τ, n) + reparam(f, θ, τ, n)
+end
+
+fig = Figure(size = (800, 1000))
+ga = fig[1, 1] = GridLayout()
+axleft = Axis(ga[1, 1])
+axright = Axis(ga[1, 2])
+
+nmax = 15
+stats = [meanstd([reinforce(f, 0.3, 2^n) for _ in 1:1000]) for n in 1:nmax];
+lines!(axleft, 1:nmax, first.(stats));
+lines!(axright, 1:nmax, last.(stats), label = "Bernoulli - reinforce");
+for (τ,color) in zip(-3:0,[:yellow, :red, :brown, :green])
+    stats = [meanstd([reparam(f, 0.3, 2^n, τ) for _ in 1:1000]) for n in 1:nmax]
+    lines!(axleft, 1:nmax, first.(stats); color)
+    lines!(axright, 1:nmax, last.(stats); color, label = "Soft bernouli with $(τ)")
+
+    stats = [meanstd([lax(f, 0.3, 2^n, τ) for _ in 1:1000]) for n in 1:nmax]
+    lines!(axleft, 1:nmax, first.(stats); color, linestyle = :dash)
+    lines!(axright, 1:nmax, last.(stats); color, linestyle = :dash, label = "lax with $(τ)")
+end
+axislegend(axright)
 fig
 
 
-
-logistic_sample(noise, mu = 0, sigma=1) = mu + logit(noise) * sigma
+# Let's now put it together to implement relax
 
 function logaddexp(x, y) 
     m =  max(x, y)
@@ -133,22 +229,6 @@ log_bernoulli(θ, x) = x * log(θ) + (1-x)*log(1-θ)
 relaxed_bernoulli_sample(logit_theta, noise, log_temperature) = bernoulli_softmax(logistic_sample(noise, expit.(logit_theta)), log_temperature)
 
 
-# Let's have some function of a single binary variable
-f(x::T) where {T<:Real} = 2x^2 - x + 3
-
-function expectation(f, θ)
-	f(1) * θ + f(0) * (1 - θ)
-end
-
-function exact_reinforce(f, θ) 
-	mapreduce(+, [(1f0, θ), (0f0, 1-θ)]) do (x, p)
-		f(x) * Zygote.gradient(θ -> log_bernoulli(θ, x), p)[1]
-	end
-end
-
-θ = 0.3f0
-expectation(f, θ) ≈ exact_reinforce(f, θ)
-
 """
     Computes p(u|b), where b = H(z), z = logit_theta + logit(noise), p(u) = U(0, 1)
 """
@@ -157,11 +237,6 @@ expectation(f, θ) ≈ exact_reinforce(f, θ)
 #     vprime = samples * (noise * (1 - uprime) + uprime) + (1 - samples) * noise * uprime
 #     logit_theta + logit(vprime)
 # end
-
-function conditional_noise(logit_theta, samples, noise)
-    uprime = expit.(-logit_theta)
-    @. samples * (noise * (1 - uprime) + uprime) + (1 - samples) * noise * uprime
-end
 
 
 ############### REINFORCE ##################
