@@ -1,9 +1,14 @@
-# # Backpropagation through the void: optimizing control variates for black-box gradient estimation
+# ### Backpropagation through the void: optimizing control variates for black-box gradient estimation
 #
-# The paper tries to solve the problem of estimating the gradient of an expectation with respect
-# to a discrete parameterized distribution. An interesting feature of the method is that 
-# the estimator is unbiassed, but it uses relaxed samples provided by reparametrization trick
-# as a control variate reducing the variance. Moreover, unlike other methods parameters of the relaxation, importantly the temperature are optimized.
+# The paper is interested in the problem of estimating the gradient of an expectation of 
+# a discrete distribution parametrized by some parameter `θ`. This problem is traditionally
+# either solved by REINFORCE method or by reparametrization trick. The REINFORCE method is 
+# unbiassed but it has high variance. The reparametrization trick is biassed, requires 
+# the function of which the expectation is computed to accept continous realizations of random variables,
+# but it has lower variance. And since it is friendly to AD, it is a popular method.
+# 
+# This paper is a reimplementation of the paper with notes, which helped the author to understand 
+# the method.
 
 using Flux
 using Flux.Zygote
@@ -11,28 +16,38 @@ using Distributions
 using Statistics
 using GLMakie
 
-# Let's start with an easy problem. Let's assume we have a function `f` of a bernoulli variable. 
-# In the paper, they use
+# Let's start with an easy problem. Let's assume we have a function `f` of a bernoulli variable random
+# variable `p(b=1|θ)`. The paper uses, therefore we stick with it.
 f(b) = (b - 0.45)^2
-# We can compute an expectation of `f` with respect to Bernoulli random variable
-# with probability `p(b=1|θ)` is given as 
-function expectation(f, θ)
-	f(1) * θ + f(0) * (1 - θ)
-end
+# We can compute an expectation of `f` with respect to `p(b=1|θ)` as 
+expectation(f, θ) = f(1) * θ + f(0) * (1 - θ)
 # Note that in reality, the support of the discrete random variable will be so large 
 # that this exact computation will be impossible to compute exactly and we have to resort to 
 # monte carlo estimation. For example the paper discusses a case of 200 hundreds Bernoulli variables,
-# which has the support of $2^200$.  The monte-carlo estimate can be computed as 
-function monte_carlo(f, θ, n)
-	mean(f.(rand(Bernoulli(θ), n)))
-end
+# which has the support of $2^200$.  The monte-carlo estimate of the expextation can be computed as 
+monte_carlo(f, θ, n) = mean(f(rand(Bernoulli(θ))) for _ in 1:n )
 # where `n` is the number of samples. The estimator is unbiassed, but it has certain variance, which
 # can be seen as follows.
-lines(20, [std(monte_carlo(f, 0.3, 2^n) for _ in 1:1000) for n in 1:20])
+lines(1:20, [std(monte_carlo(f, 0.3, 2^n) for _ in 1:1000) for n in 1:20])
 
-# But we are interested in gradients. The classic method to compute stochastic estimate of 
-# the gradient of parameters of the discrete distribution is REINFORCE. The method is based on the
-# fact that the gradient of the expectation of the function can be computed as 
+# ### Reinforce 
+# The classic method to compute stochastic estimate of the gradient of parameters of the discrete 
+# distribution is REINFORCE. The method is based on the following identity
+# 
+# ``\frac{\partial}{\theta}\left[f(b) \right] = \mathbb{E}_{b \sim p(b|\theta)} \left[f(b) p(b|\theta) \frac{\partial}{\theta} \log p(b|\theta) \right]``
+# 
+# which is proved as follows
+# 
+# ``\frac{\partial}{\theta}\left[f(b) \right] = 
+#  \frac{\partial}{\theta} \int f(b) p(b|\theta) \mathrm{d}b =
+# \int f(b) \frac{\partial}{\theta} p(b|\theta) \mathrm{d}b =
+# \int f(b) \frac{\partial}{\theta} p(b|\theta) \frac{p(b|\theta)}{ p(b|\theta)} \mathrm{d}b =
+# ``
+# ``
+# = \int f(b) p(b|\theta) \frac{\frac{\partial}{\theta} p(b|\theta)}{ p(b|\theta)} \mathrm{d}b =
+# \int f(b) \frac{\partial}{\theta} \log p(b|\theta)p(b|\theta)  \mathrm{d}b =
+# \mathbb{E}_{b \sim p(b|\theta)} \left[f(b) p(b|\theta) \frac{\partial}{\theta} \log p(b|\theta) \right] =
+# ``
 
 logpdf_bernoulli(θ, x) = x * log(θ) + (1-x)*log(1-θ)
 
@@ -66,6 +81,7 @@ lines(1:20, [std(reinforce(f, 0.3, 2^n) for _ in 1:1000) for n in 1:20])
 
 
 
+# ### Reparametrization trick
 # If the function `f` accepts real values, a popular low-variance estimator of the expectation is based on 
 # reparametrization trick.The idea is to introduce noise variable `u` from some known distribution with fixed
 # parameters (in our case uniform $U(0,1)$) and through differentiatble transformation dependent on parameters 
@@ -125,24 +141,68 @@ fig
 # see that the variance is higher than that of Reinforce method, but that can be caused by the fact that we 
 # have only one Bernoulli variable.
 
-# So far, we have two approaches. One, which is biassed and has low variance and the other, 
-# which is unbiassed but it has high variance.
-# The ideal introduced by Rebar (Rebar: Low-variance, unbiased gradient estimates for discrete latent variable models),
-# is to combine the two methods. The idea is to use the reparametrization trick to create a control variate
-# for the reinforce method and optimize its parameters to have low variance.
+# ## REBAR
+# In the above, we have introduced two methods: the first is high variance unbiassed, the second is
+# possibly low variance but biassed.
+# The idea introduced is to combine both methods. The idea is to use REINFORCE as a core 
+# method and use the reparametrization as a control variance to decrease the variance. 
+# The control variate state that we can subtract any variable `c` (random or constant) as long as 
+# correct the bias. Mathematically, we can write the estimator as
 # 
-# The idea is followig. We have a function `f` and a Bernoulli random variable with parameter `θ`.
-# Reinforce computes the gradient of the expectation of `f` with respect to `θ` as 
-# ``\mathbb{E}_{b \sim p(b|\theta)}\left[f(b)\logp(b|\theta) \right]``
-# and the reparametrization trick as 
-# ``\mathbb{E}_{u \sim U[0,1]}f(\phi(\theta,u))\right]``
-# where ``\phi(\theta,u)` is the above reparametrization trick implemented by composition `bernoulli_softmax ∘ pz_θ`.
+# ``\frac{\partial}{\partial \theta}\mathbb{E}_{c,b \sim p(b|\theta)}[f(b)] = \mathbb{E}_{b \sim p(b|\theta),c}[(f(b) -c)\frac{\partial}{\partial \theta}(\log p(b|\theta))] + \frac{\partial}{\partial \theta}\mathbb{E}_{c,b \sim p(b|\theta)}[c]``
 # 
-# This estimator is called LAX and is defined as
+# Note that `c` is some random variable with some distribution which is not explicitly denoted. 
+# The idea of *Rebar (Rebar: Low-variance, unbiased gradient estimates for discrete latent variable models),*
+# is to make the distribution of `c` dependent on `b` to reduce the variance.
 # 
-# ``\mathbb{E}_{b \sim p(b|\theta)}\left[f(b)\logp(b|\theta) - \mathbb{E}_{v \sim p(v|b,\theta)}\left[f(\phi(\theta,v)) \right]  \right] + \mathbb{E}_{u \sim U[0,1]}f(\phi(\theta,u))\right]``
+# Before going further, we recapitulate the smooth approximation (reparametrization) of Bernoulli distribution.
+# Bernoulli can be parametrized as `b = H(z)`, where `H` is Heaviside function and `z` is logistic random variable
+# defined as 
 # 
-# where we need to ensure that the distribution of ``v \sim p(v|b,\theta)p(b|\theta)`` is uniform on `[0,1].`
+# ``z = g(u,\theta) = \log \frac{\theta}{1-\theta} + log \frac{u}{1-u}``
+# 
+# where ``u \sim \textrm{U}[0,1]`` is random variable with uniform distribution. The continuous relaxation
+# of `H(z)` is sigmoid function with temperature as `σₜ(z) = σ(z/τ)`. It is obvious that as `τ` goes to zero, 
+# `σₜ(z)` approaches `H(z)`.
+# 
+# Before going further, let's discuss few interesting equivalent estimators of the gradient of the expectation.
+# The first says that the reinforce estimator of `p(b|\theta`) is equivalent to the reinforce estimator of `f ∘ H` with `p(z|\theta)`.
+# 
+# ``\mathbb{E}_{b \sim p(b|\theta)}[f(b)\frac{\partial}{\partial \theta}\log p(b|\theta)] = \frac{\partial}{\partial \theta}\mathbb{E}_{b \sim p(b|\theta)}[f(b)] =  \frac{\partial}{\partial \theta}\mathbb{E}_{z \sim p(z|\theta)}[f(H(z))] = \mathbb{E}_{z \sim p(z|\theta)}[f(H(z))\frac{\partial}{\partial \theta}\log p(z|\theta)]``
+# 
+# Using the same logic, we derive the REINFORCE estimator for the reparametrization
+# 
+# ``\frac{\partial}{\partial \theta}\mathbb{E}_{z \sim p(z|\theta)}[f(\sigma_{\tau}(z))] = \mathbb{E}_{z \sim p(z|\theta)}[f(\sigma_{\tau}(z))\frac{\partial}{\partial \theta}\log  p(z|\theta)]``
+# 
+# The problem of replacing ``\mathbb{E}_{b \sim p(b|\theta)}[f(b)\frac{\partial}{\partial \theta}\log p(b|\theta)]`` by 
+# ``\mathbb{E}_{z \sim p(z|\theta)}[f(H(z))\frac{\partial}{\partial \theta}\log p(z|\theta)]`` is that the latter has higher variance,
+# because former can be seen as conditional marginalization of the latter. The key insight of the REBAR paper is that analogous conditional 
+# marginalization can be performed for the control variate realized by the reparametrization trick.
+# 
+# ``\mathbb{E}_{z \sim p(z|\theta)}[f(\sigma_{\tau}(z))\frac{\partial}{\partial \theta}\log  p(z|\theta)] = 
+# \mathbb{E}_{b \sim p(b|\theta)}\mathbb{E}_{z \sim p(z|b,\theta)}[f(\sigma_{\tau}(z))\frac{\partial}{\partial \theta}\log  p(z|b,\theta) + f(\sigma_{\tau}(z))\frac{\partial}{\partial \theta}\log  p(b,\theta)] =
+# ``
+# 
+# `` = \mathbb{E}_{b \sim p(b|\theta)}\mathbb{E}_{z \sim p(z|b,\theta)}[f(\sigma_{\tau}(z))\frac{\partial}{\partial \theta}\log  p(z|b,\theta)] +  \mathbb{E}_{b \sim p(b|\theta)}\left[\mathbb{E}_{z \sim p(z|b,\theta)}\left[f(\sigma_{\tau}(z))\right]\frac{\partial}{\partial \theta}\log  p(b,\theta)\right]``
+# 
+# `` = \mathbb{E}_{b \sim p(b|\theta)}\left[\frac{\partial}{\partial \theta}\mathbb{E}_{z \sim p(z|b,\theta)}[f(\sigma_{\tau}(z))]\right] +  \mathbb{E}_{b \sim p(b|\theta)}\left[\mathbb{E}_{z \sim p(z|b,\theta)}\left[f(\sigma_{\tau}(z))\right]\frac{\partial}{\partial \theta}\log  p(b,\theta)\right]``
+# 
+# The paper shows that similarly to `p(z|θ)`, the distribution `p(z|b,θ)` can be sampled ``\log \frac{\theta}{1-\theta} + \log \frac{v'}{1-v'}``, where
+# ``v' = v(1-\theta)`` if `b=0` and ``v' = v\theta +(1-\theta)`` if `b = 1`. With this, we can create an
+# effiecient reparametrization of the first term above, i.e.
+# 
+# ``\mathbb{E}_{b \sim p(b|\theta)}\left[\frac{\partial}{\partial \theta}\mathbb{E}_{z \sim p(z|b,\theta)}[f(\sigma_{\tau}(z))]\right] = \mathbb{E}_{b \sim p(b|\theta)}\left[\frac{\partial}{\partial \theta}\mathbb{E}_{v \sim U}[f(\sigma_{\tau}(g(v,b,\theta)))]\right],``
+#
+# where `g(v,b,θ)` is explicitly denoted the above reparametrization as ``g(v,b,\theta) = \log \frac{\theta}{1-\theta} + \log \frac{v'}{1-v'}`` with ``v'`` being function of ``v``.
+# 
+# Let's now try to put things together
+# 
+# ``\frac{\partial}{\partial \theta}\mathbb{E}_{b \sim p(b|\theta)}[f(b)] = \mathbb{E}_{u,v \sim \mathrm{U}}\left[\left[f(H(z) - \eta f(\sigma_{\tau}(\tilde{z}))\right]\frac{\partial}{\partial \theta}\log p(b|\theta) + \eta \frac{\partial}{\partial \theta}f(\sigma_{\tau}(z) - \eta \frac{\partial}{\partial \theta}f(\sigma_{\tau}(\tilde{z})\right]``
+# 
+# where ``z = g(v,\theta),``, ``b = H(z)``, and ``\tilde{z} = g(v,b,\theta).`` The control variate is parametrized by a multiplication factor `η` and temperature `τ` of the smooth approximation of 
+# Heaviside function.
+# 
+
 
 
 # Below function generates `v` from a noise \sim U[0,1] and b
